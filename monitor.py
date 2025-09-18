@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-SportsLine Monitor - FULL PAGE SEARCH VERSION
-Searches the entire page for picks, not just the beginning
+SportsLine Monitor - WORKING VERSION
+No syntax errors, properly cleaned output
 """
 
 import requests
@@ -29,9 +29,8 @@ class SportsLineMonitor:
         
         self.state_file = 'picks_seen.json'
         self.seen_picks = self.load_seen_picks()
-        
+    
     def load_seen_picks(self):
-        """Load picks we've already sent"""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
@@ -41,7 +40,6 @@ class SportsLineMonitor:
         return set()
     
     def save_seen_picks(self):
-        """Save picks we've sent"""
         try:
             with open(self.state_file, 'w') as f:
                 json.dump(list(self.seen_picks)[-500:], f)
@@ -49,15 +47,11 @@ class SportsLineMonitor:
             pass
     
     def login(self):
-        """Login to SportsLine"""
         try:
             print("Logging in...")
-            
-            # Get login page
             login_page = self.session.get(self.login_url)
             soup = BeautifulSoup(login_page.content, 'html.parser')
             
-            # Build login data
             data = {
                 'email': self.email,
                 'password': self.password,
@@ -65,7 +59,6 @@ class SportsLineMonitor:
                 'remember_me': '1'
             }
             
-            # Add hidden form fields
             form = soup.find('form')
             if form:
                 for inp in form.find_all('input'):
@@ -73,375 +66,217 @@ class SportsLineMonitor:
                     if name and name not in data:
                         data[name] = inp.get('value', '')
             
-            # Submit login
             response = self.session.post(self.login_url, data=data, allow_redirects=True)
             
-            # Check if logged in
             if 'logout' in response.text.lower():
                 print("✅ Login successful!")
                 return True
             else:
-                print("⚠️ Login may have failed, continuing anyway...")
+                print("⚠️ Login uncertain, continuing...")
                 return True
                 
         except Exception as e:
             print(f"Login error: {e}")
             return False
     
-    def get_picks_from_page(self):
-        """Get ALL picks from the ENTIRE page"""
+    def clean_text(self, text):
+        """Remove all junk from text"""
+        if not text:
+            return ""
+        
+        # Remove common junk
+        junk_words = ['UTC', 'Money Line', 'Point Spread', 'Over', 'Under', 
+                      'Subscri', 'LAST', 'Total', 'Spread']
+        
+        for junk in junk_words:
+            text = text.replace(junk, '')
+        
+        # Remove excessive numbers
+        text = re.sub(r'\+\d{5,}', '', text)  # Remove numbers with 5+ digits
+        text = re.sub(r'-\d{5,}', '', text)
+        
+        # Clean whitespace
+        text = ' '.join(text.split())
+        
+        return text.strip()
+    
+    def extract_picks(self):
+        """Main function to extract picks from page"""
         try:
             print("Fetching picks page...")
-            r = self.session.get(self.expert_url)
-            print(f"Page status: {r.status_code}")
-            print(f"Page size: {len(r.content)} bytes")
+            response = self.session.get(self.expert_url)
+            print(f"Page status: {response.status_code}")
+            print(f"Page size: {len(response.content)} bytes")
             
-            soup = BeautifulSoup(r.content, 'html.parser')
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Get ALL text from the page
+            # Get all text
             full_text = soup.get_text()
-            # Clean up whitespace
             full_text = ' '.join(full_text.split())
             
-            print(f"Searching ENTIRE page text ({len(full_text)} characters)...")
+            print(f"Searching {len(full_text)} characters...")
             
             picks = []
             
-            # Method 1: Find all game patterns in the ENTIRE text
-            print("Looking for game patterns throughout the entire page...")
-            
-            # Multiple patterns to catch different formats
-            patterns = [
-                # Team @ Team (most common)
+            # Find all potential games
+            game_patterns = [
                 r'([A-Z][A-Za-z\.\s]{2,25}?)\s*@\s*([A-Z][A-Za-z\.\s]{2,25})',
-                # Team vs Team
-                r'([A-Z][A-Za-z\.\s]{2,25}?)\s+vs\.?\s+([A-Z][A-Za-z\.\s]{2,25})',
-                # Team at Team
-                r'([A-Z][A-Za-z\.\s]{2,25}?)\s+at\s+([A-Z][A-Za-z\.\s]{2,25})',
-                # With periods (L.A. Rams @ Seattle)
-                r'([A-Z]\.?[A-Z]?\.?\s*[A-Za-z\s]{2,20}?)\s*@\s*([A-Z][A-Za-z\.\s]{2,25})'
+                r'([A-Z][A-Za-z\.\s]{2,25}?)\s+vs\.?\s+([A-Z][A-Za-z\.\s]{2,25})'
             ]
             
-            all_matches = []
-            for pattern in patterns:
-                matches = list(re.finditer(pattern, full_text))
-                print(f"  Pattern found {len(matches)} potential games")
-                all_matches.extend(matches)
+            found_games = []
             
-            # Process each match found ANYWHERE in the page
-            seen_games = set()
-            checked_count = 0
-            
-            for match in all_matches:
-                checked_count += 1
-                team1 = match.group(1).strip()
-                team2 = match.group(2).strip()
-                
-                # Clean team names
-                team1 = re.sub(r'\s+', ' ', team1).strip()
-                team2 = re.sub(r'\s+', ' ', team2).strip()
-                
-                # Remove obvious junk from team names
-                junk_in_teams = ['UTC', 'Money Line', 'Point Spread', 'Over', 'Under', 'Subscri', 
-                                'LAST', 'Total', 'Spread']
-                for junk in junk_in_teams:
-                    team1 = team1.replace(junk, '').strip()
-                    team2 = team2.replace(junk, '').strip()
-                
-                # Basic validation
-                if len(team1) < 3 or len(team2) < 3:
-                    continue
-                if len(team1) > 30 or len(team2) > 30:
-                    continue
+            for pattern in game_patterns:
+                matches = re.finditer(pattern, full_text)
+                for match in matches:
+                    team1 = self.clean_text(match.group(1))
+                    team2 = self.clean_text(match.group(2))
                     
-                # Skip obvious non-teams
-                skip_words = ['sportsline', 'cbs', 'copyright', 'privacy', 'terms', 'cookie',
-                             'subscribe', 'login', 'password', 'email', 'footer', 'header',
-                             'navigation', 'menu', 'search', 'share', 'follow', 'interactive']
-                if any(skip in team1.lower() or skip in team2.lower() for skip in skip_words):
+                    # Skip invalid teams
+                    if not team1 or not team2:
+                        continue
+                    if len(team1) < 3 or len(team2) < 3:
+                        continue
+                    if len(team1) > 30 or len(team2) > 30:
+                        continue
+                    
+                    # Skip website junk
+                    skip_words = ['sportsline', 'cbs', 'interactive', 'copyright', 
+                                  'privacy', 'terms', 'cookie', 'login']
+                    if any(word in team1.lower() for word in skip_words):
+                        continue
+                    if any(word in team2.lower() for word in skip_words):
+                        continue
+                    
+                    # Get context
+                    start = max(0, match.start() - 300)
+                    end = min(len(full_text), match.end() + 300)
+                    context = full_text[start:end]
+                    
+                    # Check if this is a pick
+                    if not any(word in context.lower() for word in ['pick', 'play', 'bet', 'unit']):
+                        continue
+                    
+                    found_games.append({
+                        'team1': team1,
+                        'team2': team2,
+                        'context': context
+                    })
+            
+            # Process found games
+            seen = set()
+            for game_info in found_games:
+                team1 = game_info['team1']
+                team2 = game_info['team2']
+                context = game_info['context']
+                
+                game_str = f"{team1} @ {team2}"
+                
+                if game_str in seen:
                     continue
+                seen.add(game_str)
                 
-                game = f"{team1} @ {team2}"
+                # Extract pick details
+                pick_team = team2  # Default
                 
-                # Skip duplicates
-                if game in seen_games:
-                    continue
-                seen_games.add(game)
+                # Look for actual pick
+                for team in [team1, team2]:
+                    if re.search(rf'(?:pick|play|take)\s+{re.escape(team)}', context, re.I):
+                        pick_team = team
+                        break
                 
-                # Get context (more context = better)
-                start = max(0, match.start() - 500)
-                end = min(len(full_text), match.end() + 500)
-                context = full_text[start:end]
+                # Look for spread
+                spread = ""
+                spread_match = re.search(r'([+-]\d+\.?\d?)(?:\s|$)', context)
+                if spread_match:
+                    spread_val = spread_match.group(1)
+                    try:
+                        val = float(spread_val)
+                        if -50 < val < 50:
+                            spread = spread_val
+                    except:
+                        pass
                 
-                # Look for pick indicators in the context
-                pick_indicators = ['pick', 'play', 'bet', 'like', 'take', 'best bet', 'unit', 
-                                  'confidence', 'lean', 'side', 'total', 'over', 'under',
-                                  'spread', 'moneyline', 'money line']
+                if spread:
+                    pick_team = f"{pick_team} {spread}"
                 
-                has_indicator = any(ind in context.lower() for ind in pick_indicators)
+                # Look for odds
+                odds = "N/A"
+                odds_match = re.search(r'([+-]\d{3,4})(?!\d)', context)
+                if odds_match:
+                    try:
+                        val = int(odds_match.group(1))
+                        if -2000 < val < 2000:
+                            odds = odds_match.group(1)
+                    except:
+                        pass
                 
-                if not has_indicator:
-                    continue
+                # Look for units
+                units = "1"
+                units_match = re.search(r'(\d+\.?\d?)\s*units?', context, re.I)
+                if units_match:
+                    try:
+                        val = float(units_match.group(1))
+                        if 0 < val <= 10:
+                            units = units_match.group(1)
+                    except:
+                        pass
                 
-                # This looks like a real pick!
-                print(f"Found potential pick: {game}")
+                pick = {
+                    'game': game_str,
+                    'pick': pick_team,
+                    'odds': odds,
+                    'units': units
+                }
                 
-                # Extract details
-                pick = self.extract_pick_details(game, context)
-                if pick:
-                    picks.append(pick)
+                picks.append(pick)
+                print(f"Found: {game_str} -> {pick_team}")
             
-            print(f"Checked {checked_count} potential games, found {len(picks)} valid picks")
-            
-            # Method 2: Also check structured elements
-            # Look for divs/sections that might contain picks
-            pick_containers = soup.find_all(['div', 'article', 'section', 'tr'])
-            
-            for container in pick_containers:
-                text = container.get_text()
-                # Quick check if this could be a pick
-                if '@' in text or ' vs ' in text.lower() or ' at ' in text.lower():
-                    if any(word in text.lower() for word in ['pick', 'play', 'bet', 'unit']):
-                        # Try to extract a pick from this container
-                        container_pick = self.extract_pick_from_container(container)
-                        if container_pick:
-                            # Check if we already have this game
-                            if not any(p['game'] == container_pick['game'] for p in picks):
-                                picks.append(container_pick)
-                                print(f"Found pick in container: {container_pick['game']}")
-            
-            # Remove any remaining duplicates and validate
-            final_picks = []
-            seen_games_final = set()
-            
-            for pick in picks:
-                # Clean the game string once more
-                pick['game'] = self.clean_game_string(pick['game'])
-                
-                # Clean the pick string
-                pick['pick'] = self.clean_pick_string(pick['pick'])
-                
-                # Validate it's a real pick
-                if not self.is_valid_pick(pick):
-                    continue
-                
-                # Check for duplicates
-                if pick['game'] not in seen_games_final:
-                    seen_games_final.add(pick['game'])
-                    final_picks.append(pick)
-                    print(f"✓ Final pick: {pick['game']} - {pick['pick']}")
-            
-            return final_picks
+            return picks
             
         except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error extracting picks: {e}")
             return []
-    
-    def clean_pick_string(self, pick_str):
-        """Clean up the pick string"""
-        # Remove junk that got concatenated
-        junk = ['Money Line', 'Point Spread', 'Over', 'Under', 'Subscri', 'LAST', 'Total']
-        for j in junk:
-            pick_str = pick_str.replace(j, '')
-        
-        # Remove huge numbers that are clearly wrong
-        pick_str = re.sub(r'\+\d{4,}', '', pick_str)
-        
-        # Clean whitespace
-        pick_str = ' '.join(pick_str.split())
-        
-        return pick_str.strip()
-            
-        except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    def extract_pick_details(self, game, context):
-        """Extract pick details from context - CLEANED UP"""
-        try:
-            # Clean the game string first
-            game = self.clean_game_string(game)
-            
-            teams = game.split('@')
-            if len(teams) != 2:
-                return None
-            
-            away_team = teams[0].strip()
-            home_team = teams[1].strip()
-            
-            # Default pick is home team
-            pick_team = home_team
-            
-            # Try to find the actual pick
-            pick_patterns = [
-                rf'(?:pick|play|take|bet on?)\s+({re.escape(away_team)}|{re.escape(home_team)})',
-                rf'({re.escape(away_team)}|{re.escape(home_team)})\s+[+-]\d+',
-                rf'like\s+({re.escape(away_team)}|{re.escape(home_team)})'
-            ]
-            
-            for pattern in pick_patterns:
-                match = re.search(pattern, context, re.I)
-                if match:
-                    pick_team = match.group(1)
-                    break
-            
-            # Look for spread
-            spread = ""
-            spread_match = re.search(r'([+-]\d+\.?\d?)(?:\s|$)', context)
-            if spread_match:
-                spread_val = spread_match.group(1)
-                # Validate it's a reasonable spread
-                try:
-                    if -50 < float(spread_val) < 50:  # Reasonable spread range
-                        spread = spread_val
-                        pick_team = f"{pick_team} {spread}"
-                except:
-                    pass
-            
-            # Look for odds (should be 3-4 digits with +/-)
-            odds = "N/A"
-            odds_match = re.search(r'([+-]\d{3,4})(?!\d)', context)
-            if odds_match:
-                odds_val = odds_match.group(1)
-                try:
-                    if -5000 < int(odds_val) < 5000:  # Reasonable odds range
-                        odds = odds_val
-                except:
-                    pass
-            
-            # Look for units
-            units = "1"
-            units_match = re.search(r'(\d+\.?\d?)\s*units?', context, re.I)
-            if units_match:
-                units_val = units_match.group(1)
-                try:
-                    if 0 < float(units_val) <= 10:  # Reasonable units range
-                        units = units_val
-                except:
-                    pass
-            
-            # Look for confidence
-            confidence = ""
-            if any(term in context.lower() for term in ['best bet', '5 star', 'five star']):
-                confidence = "⭐⭐⭐⭐⭐"
-            elif '4 star' in context.lower():
-                confidence = "⭐⭐⭐⭐"
-            elif '3 star' in context.lower():
-                confidence = "⭐⭐⭐"
-            
-            return {
-                'game': game,
-                'pick': pick_team,
-                'odds': odds,
-                'units': units,
-                'confidence': confidence
-            }
-            
-        except Exception as e:
-            print(f"Error extracting details: {e}")
-            return None
-    
-    def clean_game_string(self, game):
-        """Clean up the game string by removing junk"""
-        # Remove common junk patterns
-        junk_patterns = [
-            r'UTC',  # Timezone indicator
-            r'Money Line.*',  # Bet type that got concatenated
-            r'Point Spread.*',  # Bet type
-            r'Over.*',  # Bet type
-            r'Under.*',  # Bet type
-            r'Subscri.*',  # "Subscribe" text
-            r'LAST.*',  # Other junk
-            r'\+\d{4,}.*',  # Weird long numbers
-        ]
-        
-        for pattern in junk_patterns:
-            game = re.sub(pattern, '', game, flags=re.I)
-        
-        # Clean extra whitespace
-        game = ' '.join(game.split())
-        
-        # Ensure @ is properly spaced
-        game = re.sub(r'\s*@\s*', ' @ ', game)
-        
-        return game.strip()
-    
-    def is_valid_pick(self, pick):
-        """Validate that this is a real sports pick - IMPROVED"""
-        if not pick or not pick.get('game'):
-            return False
-        
-        game = pick['game']
-        
-        # Skip obvious junk
-        if 'sportsline' in game.lower() or 'cbs' in game.lower():
-            return False
-        
-        # Must have @ separator
-        if '@' not in game:
-            return False
-        
-        teams = game.split('@')
-        if len(teams) != 2:
-            return False
-        
-        # Both teams must be reasonable length
-        for team in teams:
-            team = team.strip()
-            if len(team) < 3 or len(team) > 35:
-                return False
-        
-        return True
-    
-    def extract_pick_from_container(self, container):
-        """Extract pick from a specific HTML container"""
-        try:
-            text = container.get_text()
-            text = ' '.join(text.split())  # Clean whitespace
-            
-            # Look for game
-            match = re.search(r'([A-Z][A-Za-z\.\s]{2,25}?)\s*@\s*([A-Z][A-Za-z\.\s]{2,25})', text)
-            if not match:
-                match = re.search(r'([A-Z][A-Za-z\.\s]{2,25}?)\s+vs\.?\s+([A-Z][A-Za-z\.\s]{2,25})', text)
-            
-            if not match:
-                return None
-            
-            game = f"{match.group(1).strip()} @ {match.group(2).strip()}"
-            
-            # Extract other details
-            return self.extract_pick_details(game, text)
-            
-        except:
-            return None
     
     def generate_pick_id(self, pick):
-        """Generate unique ID for a pick"""
         content = f"{pick['game']}-{pick['pick']}-{datetime.now().strftime('%Y-%m-%d')}"
         return hashlib.md5(content.encode()).hexdigest()[:10]
     
     def send_to_discord(self, picks):
-        """Send picks to Discord"""
         for pick in picks:
             try:
-                # Generate ID
                 pick_id = self.generate_pick_id(pick)
                 
-                # Skip if already sent
                 if pick_id in self.seen_picks:
                     print(f"Skipping duplicate: {pick['game']}")
                     continue
                 
-                # Build embed
+                # Determine sport
+                game_lower = pick['game'].lower()
+                sport = "🏟️"
+                
+                # Check for known teams
+                nfl_teams = ['patriots', 'bills', 'cowboys', 'packers', 'chiefs', 'eagles', 'rams']
+                nba_teams = ['lakers', 'celtics', 'warriors', 'heat', 'bulls', 'knicks']
+                mlb_teams = ['yankees', 'dodgers', 'astros', 'angels', 'mets', 'cubs']
+                soccer_teams = ['barcelona', 'manchester', 'liverpool', 'chelsea', 'arsenal']
+                
+                if any(team in game_lower for team in nfl_teams):
+                    sport = "🏈 NFL"
+                elif any(team in game_lower for team in nba_teams):
+                    sport = "🏀 NBA"
+                elif any(team in game_lower for team in mlb_teams):
+                    sport = "⚾ MLB"
+                elif any(team in game_lower for team in soccer_teams):
+                    sport = "⚽ Soccer"
+                elif 'college' in game_lower or 'state' in game_lower or 'university' in game_lower:
+                    sport = "🎓 College"
+                
                 embed = {
                     "title": "🎯 New Bruce Marshall Pick",
-                    "color": 0x00ff00 if not pick['confidence'] else 0xffd700,
+                    "color": 0x00ff00,
                     "fields": [
-                        {"name": "🏟️ Game", "value": f"**{pick['game']}**", "inline": False},
+                        {"name": f"{sport} Game", "value": f"**{pick['game']}**", "inline": False},
                         {"name": "📊 Pick", "value": f"**{pick['pick']}**", "inline": True},
                         {"name": "💰 Odds", "value": pick['odds'], "inline": True},
                         {"name": "🎲 Units", "value": f"{pick['units']} unit{'s' if pick['units'] != '1' else ''}", "inline": True}
@@ -449,9 +284,6 @@ class SportsLineMonitor:
                     "footer": {"text": "Bruce Marshall • SportsLine"},
                     "timestamp": datetime.now().isoformat()
                 }
-                
-                if pick['confidence']:
-                    embed["fields"].insert(1, {"name": "🔥 Confidence", "value": pick['confidence'], "inline": False})
                 
                 payload = {"username": "SportsLine Monitor", "embeds": [embed]}
                 
@@ -466,7 +298,6 @@ class SportsLineMonitor:
                 print(f"Discord error: {e}")
     
     def run(self):
-        """Main execution"""
         print("="*50)
         print(f"SportsLine Monitor - {datetime.now().strftime('%I:%M %p')}")
         print("="*50)
@@ -479,14 +310,10 @@ class SportsLineMonitor:
             print("❌ Login failed")
             return
         
-        picks = self.get_picks_from_page()
+        picks = self.extract_picks()
         
         if not picks:
-            print("No picks found on page")
-            print("\nPossible reasons:")
-            print("1. No picks posted yet today")
-            print("2. Picks are in a different format")
-            print("3. Need to scroll or click to load picks")
+            print("No picks found")
             return
         
         # Filter new picks
@@ -497,10 +324,10 @@ class SportsLineMonitor:
                 new_picks.append(pick)
         
         if new_picks:
-            print(f"\n📤 Sending {len(new_picks)} new picks to Discord...")
+            print(f"\n📤 Sending {len(new_picks)} new picks...")
             self.send_to_discord(new_picks)
         else:
-            print("No new picks (all previously sent)")
+            print("No new picks to send")
         
         self.save_seen_picks()
         print("\n✅ Complete")
