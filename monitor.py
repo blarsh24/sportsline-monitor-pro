@@ -50,33 +50,124 @@ class SportsLineMonitor:
             pass
     
     def login(self):
-        """Login to SportsLine"""
+        """Login to SportsLine - FIXED VERSION"""
         try:
             print("Logging in...")
             
-            # Get login page
-            r = self.session.get(self.login_url)
-            soup = BeautifulSoup(r.content, 'html.parser')
+            # Step 1: Get login page to get cookies and tokens
+            login_page = self.session.get(self.login_url)
+            soup = BeautifulSoup(login_page.content, 'html.parser')
             
-            # Setup login data
+            # Step 2: Find the login form and get all fields
             data = {
                 'email': self.email,
-                'password': self.password
+                'password': self.password,
+                'remember': '1',
+                'remember_me': '1'
             }
             
-            # Add any hidden fields from form
-            form = soup.find('form')
-            if form:
-                for inp in form.find_all('input', type='hidden'):
-                    if inp.get('name'):
-                        data[inp.get('name')] = inp.get('value', '')
+            # Add ALL hidden fields from the form
+            forms = soup.find_all('form')
+            for form in forms:
+                # Find the login form (usually has email/password fields)
+                if form.find('input', {'type': 'email'}) or form.find('input', {'name': 'email'}):
+                    for inp in form.find_all('input'):
+                        name = inp.get('name')
+                        value = inp.get('value', '')
+                        if name and name not in data:
+                            data[name] = value
+                    break
             
-            # Login
-            self.session.post(self.login_url, data=data)
-            print("Login attempt completed")
-            return True
+            print(f"Login data fields: {list(data.keys())}")
+            
+            # Step 3: Submit login
+            response = self.session.post(
+                self.login_url,
+                data=data,
+                allow_redirects=True
+            )
+            
+            # Step 4: Verify login worked
+            time.sleep(2)  # Give it a moment
+            
+            # Check if we can access the expert page
+            test_page = self.session.get(self.expert_url)
+            test_soup = BeautifulSoup(test_page.content, 'html.parser')
+            test_text = test_soup.get_text().lower()
+            
+            # Check for login success indicators
+            if 'log out' in test_text or 'logout' in test_text or 'my account' in test_text:
+                print("✅ Login successful!")
+                return True
+            elif 'subscribe now' in test_text or 'join now' in test_text:
+                print("❌ Login failed - still seeing subscribe prompts")
+                print("Trying alternative login method...")
+                
+                # Alternative: Try to find and click login button
+                return self.alternative_login()
+            else:
+                print("⚠️ Login status unclear, proceeding anyway")
+                return True
+                
         except Exception as e:
             print(f"Login error: {e}")
+            return False
+    
+    def alternative_login(self):
+        """Alternative login approach"""
+        try:
+            # Fresh session
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.sportsline.com/'
+            })
+            
+            # Get main page first (sometimes needed for cookies)
+            self.session.get('https://www.sportsline.com/')
+            time.sleep(1)
+            
+            # Now get login page
+            login_resp = self.session.get(self.login_url)
+            soup = BeautifulSoup(login_resp.content, 'html.parser')
+            
+            # Build login data more carefully
+            login_data = {}
+            
+            # Find the actual form
+            form = soup.find('form', {'method': 'post'}) or soup.find('form')
+            if form:
+                # Get form action URL
+                action = form.get('action', self.login_url)
+                if not action.startswith('http'):
+                    action = 'https://www.sportsline.com' + action
+                
+                # Get all inputs
+                for inp in form.find_all(['input', 'button']):
+                    name = inp.get('name')
+                    if name:
+                        if name == 'email' or 'email' in name.lower():
+                            login_data[name] = self.email
+                        elif name == 'password' or 'pass' in name.lower():
+                            login_data[name] = self.password
+                        else:
+                            login_data[name] = inp.get('value', '')
+                
+                # Post to the form action
+                resp = self.session.post(action, data=login_data, allow_redirects=True)
+                
+                # Check success
+                if 'logout' in resp.text.lower() or len(resp.text) > 100000:
+                    print("✅ Alternative login successful!")
+                    return True
+            
+            print("❌ Alternative login also failed")
+            return False
+            
+        except Exception as e:
+            print(f"Alternative login error: {e}")
             return False
     
     def get_picks_from_page(self):
@@ -251,54 +342,133 @@ class SportsLineMonitor:
             return None
     
     def extract_picks_from_text(self, text):
-        """Fallback: extract picks from raw text"""
+        """Fallback: extract picks from raw text - IMPROVED"""
         picks = []
         
         # Clean the text
         text = re.sub(r'\s+', ' ', text)
         
-        # Find all game patterns
-        game_pattern = r'([A-Z][A-Za-z]{2,}(?:\s+[A-Za-z]+)?)\s+@\s+([A-Z][A-Za-z]{2,}(?:\s+[A-Za-z]+)?)'
+        print("DEBUG: Searching for game patterns...")
         
-        for match in re.finditer(game_pattern, text):
-            team1 = match.group(1)
-            team2 = match.group(2)
+        # Multiple patterns to try
+        patterns = [
+            # Standard: Team @ Team
+            r'([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?)\s+@\s+([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?)',
+            # With city: City Team @ City Team  
+            r'([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?(?:\s+[A-Za-z]+)?)\s+@\s+([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?(?:\s+[A-Za-z]+)?)',
+            # Vs format: Team vs Team
+            r'([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?)\s+vs\.?\s+([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?)'
+        ]
+        
+        all_matches = []
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, text))
+            all_matches.extend(matches)
+            if matches:
+                print(f"DEBUG: Found {len(matches)} potential games with pattern")
+        
+        # Process matches
+        seen_games = set()
+        for match in all_matches:
+            team1 = match.group(1).strip()
+            team2 = match.group(2).strip()
             
-            # Validate teams
+            # Debug output
+            print(f"DEBUG: Checking potential game: {team1} @ {team2}")
+            
+            # Basic validation
             if len(team1) < 3 or len(team2) < 3:
-                continue
-            if any(skip in (team1 + team2).lower() for skip in ['sportsline', 'cbs', 'copyright', 'privacy']):
+                print(f"  -> Rejected: team name too short")
                 continue
             
-            # Get context
-            start = max(0, match.start() - 100)
-            end = min(len(text), match.end() + 200)
-            context = text[start:end]
-            
-            # Must have pick indicator
-            if not re.search(r'(pick|play|bet|take)', context, re.I):
+            # Skip obvious non-teams
+            skip_words = ['sportsline', 'cbs', 'interactive', 'copyright', 'privacy', 'terms', 
+                         'conditions', 'subscribe', 'login', 'password', 'email', 'cookies']
+            if any(skip in team1.lower() or skip in team2.lower() for skip in skip_words):
+                print(f"  -> Rejected: contains website terms")
                 continue
             
             game = f"{team1} @ {team2}"
-            pick = team2  # Default
+            
+            # Avoid duplicates
+            if game in seen_games:
+                continue
+            seen_games.add(game)
+            
+            # Get context
+            start = max(0, match.start() - 150)
+            end = min(len(text), match.end() + 250)
+            context = text[start:end]
+            
+            # Look for pick indicators nearby
+            has_pick_indicator = any(word in context.lower() for word in 
+                                    ['pick', 'play', 'bet', 'like', 'take', 'best bet', 'unit'])
+            
+            if not has_pick_indicator:
+                print(f"  -> Rejected: no pick indicators nearby")
+                continue
+            
+            print(f"  -> ACCEPTED: {game}")
+            
+            # Extract pick details
+            pick = team2  # Default to home team
             
             # Try to find actual pick
-            pick_match = re.search(r'(?:pick|play|take)\s+([A-Za-z\s]+?)(?:\s+[+-]|\.|$)', context, re.I)
-            if pick_match:
-                pick = pick_match.group(1).strip()
+            pick_patterns = [
+                r'(?:pick|play|take|bet)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)',
+                r'([A-Za-z]+(?:\s+[A-Za-z]+)?)\s+[+-]\d+\.?\d?'
+            ]
+            
+            for pp in pick_patterns:
+                pm = re.search(pp, context, re.I)
+                if pm:
+                    potential_pick = pm.group(1).strip()
+                    # Make sure it's one of the teams
+                    if potential_pick.lower() in team1.lower() or potential_pick.lower() in team2.lower():
+                        pick = potential_pick
+                        break
+            
+            # Look for spread
+            spread = ""
+            spread_match = re.search(r'([+-]\d+\.?\d?)', context)
+            if spread_match:
+                spread = spread_match.group(1)
+                pick = f"{pick} {spread}"
+            
+            # Look for odds
+            odds = "N/A"
+            odds_match = re.search(r'([+-]\d{3,4})(?!\d)', context)
+            if odds_match:
+                odds_val = int(odds_match.group(1))
+                if -2000 < odds_val < 2000:  # Reasonable odds range
+                    odds = odds_match.group(1)
+            
+            # Look for units
+            units = "1"
+            units_match = re.search(r'(\d+\.?\d?)\s*units?', context, re.I)
+            if units_match:
+                units = units_match.group(1)
+            
+            # Look for confidence
+            confidence = ""
+            if any(conf in context.lower() for conf in ['best bet', '5 star', 'five star']):
+                confidence = "⭐⭐⭐⭐⭐"
+            elif '4 star' in context.lower():
+                confidence = "⭐⭐⭐⭐"
             
             picks.append({
                 'game': game,
                 'pick': pick,
-                'odds': "Check Site",
-                'units': "1",
-                'confidence': "",
+                'odds': odds,
+                'units': units,
+                'confidence': confidence,
                 'raw_text': context[:200]
             })
             
-            if len(picks) >= 5:
+            if len(picks) >= 10:  # Limit
                 break
         
+        print(f"DEBUG: Extracted {len(picks)} picks from text")
         return picks
     
     def is_valid_pick(self, pick):
@@ -439,8 +609,15 @@ class SportsLineMonitor:
     
     def run(self):
         """Main execution"""
+        # Fix timezone - use PST/PDT for west coast
+        from datetime import datetime
+        import time
+        
+        # Get current time in PST (UTC-8) or PDT (UTC-7)
+        local_time = datetime.now()
+        
         print("\n" + "="*50)
-        print(f"SportsLine Monitor - {datetime.now().strftime('%I:%M %p')}")
+        print(f"SportsLine Monitor - {local_time.strftime('%I:%M %p')} Local Time")
         print("="*50)
         
         # Check credentials
