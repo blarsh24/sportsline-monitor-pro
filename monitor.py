@@ -171,7 +171,7 @@ class SportsLineMonitor:
             return False
     
     def get_picks_from_page(self):
-        """Get the actual picks from the page"""
+        """Get the actual picks from the page - IMPROVED"""
         try:
             print("Fetching picks page...")
             r = self.session.get(self.expert_url)
@@ -185,55 +185,106 @@ class SportsLineMonitor:
             if 'subscribe now' in page_text.lower() or 'join now' in page_text.lower():
                 print("⚠️ WARNING: Might not be logged in properly (seeing subscribe prompts)")
             
+            # DEBUG: Let's see what's actually on the page
+            print("\n=== PAGE CONTENT SAMPLE ===")
+            # Look for anything that might be a pick
+            sample = page_text[:2000].replace('\n', ' ').replace('\t', ' ')
+            print(f"First 2000 chars: {sample}")
+            
+            # Look for specific sections
+            print("\n=== SEARCHING FOR PICKS ===")
+            
             picks = []
             
-            # Method 1: Look for pick articles/divs
-            pick_containers = soup.find_all(['article', 'div'], class_=lambda x: x and ('pick' in str(x).lower() or 'play' in str(x).lower()))
+            # Method 1: Look for specific pick elements
+            # Try different class names that might contain picks
+            possible_classes = ['pick', 'play', 'bet', 'prediction', 'selection', 'expert-pick', 
+                               'pick-card', 'game-pick', 'best-bet', 'premium-pick']
             
-            for container in pick_containers[:10]:
-                pick_data = self.extract_pick_from_container(container)
-                if pick_data:
-                    picks.append(pick_data)
+            for class_name in possible_classes:
+                elements = soup.find_all(['div', 'article', 'section'], class_=re.compile(class_name, re.I))
+                if elements:
+                    print(f"Found {len(elements)} elements with class containing '{class_name}'")
+                    for elem in elements[:3]:  # Check first 3
+                        text = elem.get_text()[:200]
+                        print(f"  Element text: {text}")
+                        pick_data = self.extract_pick_from_container(elem)
+                        if pick_data:
+                            picks.append(pick_data)
             
-            # Method 2: Look in tables
+            # Method 2: Look for picks in any div/article with game-like content
+            all_divs = soup.find_all(['div', 'article'], limit=100)
+            for div in all_divs:
+                text = div.get_text()
+                # Quick check if this might be a pick
+                if '@' in text or ' vs ' in text.lower():
+                    if any(word in text.lower() for word in ['pick', 'play', 'bet', 'unit']):
+                        pick_data = self.extract_pick_from_container(div)
+                        if pick_data:
+                            picks.append(pick_data)
+            
+            # Method 3: Look in tables
             tables = soup.find_all('table')
-            for table in tables:
+            print(f"Found {len(tables)} tables")
+            for i, table in enumerate(tables[:5]):
+                print(f"Table {i+1} sample: {table.get_text()[:200]}")
                 rows = table.find_all('tr')[1:]  # Skip header
                 for row in rows[:10]:
                     pick_data = self.extract_pick_from_row(row)
                     if pick_data:
                         picks.append(pick_data)
             
-            # Method 3: Search for patterns in text
-            text = soup.get_text()
-            print(f"Searching text ({len(text)} characters)...")
+            # Method 4: Last resort - search raw HTML for specific patterns
+            html_text = str(soup)
+            print(f"\nSearching raw HTML ({len(html_text)} characters)...")
             
-            # Debug: Show a sample of what we're seeing
-            if 'baltimore' in text.lower() or 'yankees' in text.lower() or 'lakers' in text.lower():
-                print("✓ Found team names in page")
-            else:
-                print("⚠️ No common team names found - page might be wrong")
-                # Print first 500 chars to see what we got
-                print(f"Page preview: {text[:500]}")
+            # Look for JSON data that might contain picks
+            json_pattern = r'window\.__INITIAL_STATE__\s*=\s*({.*?});'
+            json_match = re.search(json_pattern, html_text, re.DOTALL)
+            if json_match:
+                print("Found JSON data in page")
+                try:
+                    import json
+                    data = json.loads(json_match.group(1))
+                    print(f"JSON keys: {list(data.keys())[:10]}")
+                except:
+                    pass
+            
+            # Method 5: Search for patterns in text
+            text = soup.get_text()
+            # Remove excessive whitespace
+            text = ' '.join(text.split())
+            print(f"Searching cleaned text ({len(text)} characters)...")
+            
+            # Show a sample where we might expect picks
+            if 'bruce marshall' in text.lower():
+                idx = text.lower().index('bruce marshall')
+                print(f"Content near 'Bruce Marshall': {text[idx:idx+500]}")
             
             text_picks = self.extract_picks_from_text(text)
             picks.extend(text_picks)
             
             # Clean and validate picks
             valid_picks = []
+            seen = set()
             for pick in picks:
                 if self.is_valid_pick(pick):
-                    valid_picks.append(pick)
-                    print(f"✓ Valid pick found: {pick['game']}")
+                    game_id = pick['game']
+                    if game_id not in seen:
+                        seen.add(game_id)
+                        valid_picks.append(pick)
+                        print(f"✓ Valid pick found: {pick['game']}")
                 else:
                     if pick and pick.get('game'):
                         print(f"✗ Invalid pick filtered out: {pick['game']}")
             
-            print(f"Found {len(picks)} total picks, {len(valid_picks)} valid picks")
+            print(f"\nFound {len(picks)} total picks, {len(valid_picks)} valid unique picks")
             return valid_picks
             
         except Exception as e:
             print(f"Error getting picks: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def extract_pick_from_container(self, container):
@@ -472,54 +523,70 @@ class SportsLineMonitor:
         return picks
     
     def is_valid_pick(self, pick):
-        """Validate that this is a real sports pick"""
+        """Validate that this is a real sports pick - LESS STRICT"""
         if not pick or not pick.get('game'):
             return False
         
         game = pick['game'].lower()
         
         # Must not contain website junk
-        junk = ['sportsline', 'cbs', 'interactive', '.com', 'copyright', 'privacy', 'terms']
+        junk = ['sportsline.com', 'cbs', 'interactive.com', 'copyright', 'privacy policy', 'terms of service']
         if any(j in game for j in junk):
+            print(f"  Rejected '{pick['game']}': contains junk words")
             return False
         
         # Must have reasonable team names
         teams = game.split('@')
         if len(teams) != 2:
+            print(f"  Rejected '{pick['game']}': not in Team @ Team format")
             return False
         
         for team in teams:
             team = team.strip()
-            if len(team) < 3 or len(team) > 30:
+            if len(team) < 3:
+                print(f"  Rejected '{pick['game']}': team name too short")
+                return False
+            if len(team) > 40:
+                print(f"  Rejected '{pick['game']}': team name too long")
                 return False
         
-        # Check if it's a known sport
-        all_teams = game
-        sports_keywords = [
+        # For now, let's be less strict about requiring known teams
+        # Just check if it looks sports-related
+        sports_indicators = [
+            # General sports terms
+            'united', 'city', 'fc', 'athletic', 'real', 'sporting',
+            # US cities
+            'new york', 'los angeles', 'chicago', 'houston', 'philadelphia',
+            'phoenix', 'san antonio', 'san diego', 'dallas', 'san jose',
+            'detroit', 'boston', 'seattle', 'denver', 'washington',
+            'miami', 'atlanta', 'oakland', 'kansas city', 'milwaukee',
+            'minnesota', 'cleveland', 'tampa', 'pittsburgh', 'cincinnati',
+            'baltimore', 'charlotte', 'orlando', 'portland', 'sacramento',
+            # Common team names
+            'state', 'university', 'college', 
             # NFL
             'patriots', 'bills', 'dolphins', 'jets', 'ravens', 'bengals', 'browns', 'steelers',
             'texans', 'colts', 'jaguars', 'titans', 'broncos', 'chiefs', 'raiders', 'chargers',
             'cowboys', 'giants', 'eagles', 'commanders', 'bears', 'lions', 'packers', 'vikings',
-            'falcons', 'panthers', 'saints', 'buccaneers', '49ers', 'cardinals', 'rams', 'seahawks',
             # NBA
-            'lakers', 'clippers', 'warriors', 'suns', 'kings', 'blazers', 'nuggets', 'jazz',
-            'timberwolves', 'thunder', 'mavericks', 'rockets', 'grizzlies', 'pelicans', 'spurs',
-            'celtics', 'nets', 'knicks', '76ers', 'raptors', 'heat', 'magic', 'hawks',
-            'hornets', 'wizards', 'bulls', 'cavaliers', 'pistons', 'pacers', 'bucks',
-            # MLB  
-            'yankees', 'red sox', 'orioles', 'rays', 'blue jays', 'white sox', 'guardians',
-            'tigers', 'royals', 'twins', 'astros', 'angels', 'athletics', 'mariners', 'rangers',
-            'braves', 'marlins', 'mets', 'phillies', 'nationals', 'cubs', 'reds', 'brewers',
-            'pirates', 'cardinals', 'dodgers', 'padres', 'giants', 'diamondbacks', 'rockies',
-            # College
-            'state', 'university', 'college', 'tech', 'alabama', 'georgia', 'ohio', 'michigan',
-            'florida', 'texas', 'oklahoma', 'clemson', 'notre dame', 'usc', 'ucla'
+            'lakers', 'clippers', 'warriors', 'celtics', 'nets', 'knicks', 'heat', 'bulls',
+            # MLB
+            'yankees', 'mets', 'dodgers', 'giants', 'cubs', 'sox', 'astros', 'braves'
         ]
         
-        # Must contain at least one sports keyword
-        if not any(keyword in all_teams for keyword in sports_keywords):
-            return False
+        # Check if at least one indicator is present
+        has_indicator = any(indicator in game for indicator in sports_indicators)
         
+        if not has_indicator:
+            # Still accept if it looks like City vs City or Team vs Team
+            if re.search(r'[A-Z][a-z]+', pick['game']):  # Has proper capitalization
+                print(f"  Accepting '{pick['game']}': looks like proper team names")
+                return True
+            else:
+                print(f"  Rejected '{pick['game']}': no sports indicators found")
+                return False
+        
+        print(f"  Accepted '{pick['game']}': valid sports pick")
         return True
     
     def generate_pick_id(self, pick):
