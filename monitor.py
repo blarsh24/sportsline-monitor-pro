@@ -18,6 +18,9 @@ class SimpleMonitor:
         self.password = os.environ.get('SPORTSLINE_PASSWORD')
         self.webhook = os.environ.get('DISCORD_WEBHOOK_URL')
         
+        # Control whether to send status updates (can be turned off if too noisy)
+        self.send_status_updates = os.environ.get('SEND_STATUS_UPDATES', 'true').lower() == 'true'
+        
         # URLs
         self.expert_url = "https://www.sportsline.com/experts/51297150/bruce-marshall/"
         self.login_url = "https://www.sportsline.com/login"
@@ -188,6 +191,66 @@ class SimpleMonitor:
             print(f"❌ Discord error: {e}")
             return False
     
+    def send_status_update(self, current_hash, changed=False):
+        """Send status update to Discord"""
+        try:
+            if changed:
+                # Already handled by send_discord_alert
+                return
+            
+            # Send "no changes" status update
+            embed = {
+                "title": "✅ Monitor Status: Active",
+                "description": "No new picks found",
+                "color": 0x00FF00,  # Green for all good
+                "fields": [
+                    {
+                        "name": "📊 Status",
+                        "value": "Page unchanged - no new picks",
+                        "inline": False
+                    },
+                    {
+                        "name": "🔍 Current Hash",
+                        "value": f"`{current_hash[:12]}...`",
+                        "inline": True
+                    },
+                    {
+                        "name": "📝 Previous Hash", 
+                        "value": f"`{self.last_hash[:12]}...`" if self.last_hash else "First run",
+                        "inline": True
+                    },
+                    {
+                        "name": "⏰ Check Time",
+                        "value": datetime.now().strftime('%I:%M %p EST'),
+                        "inline": True
+                    },
+                    {
+                        "name": "📅 Last Change",
+                        "value": self.last_check if self.last_check else "Unknown",
+                        "inline": True
+                    }
+                ],
+                "footer": {
+                    "text": "Next check in 5 minutes",
+                    "icon_url": "https://www.sportsline.com/favicon.ico"
+                }
+            }
+            
+            payload = {
+                "username": "SportsLine Monitor",
+                "embeds": [embed]
+            }
+            
+            response = requests.post(self.webhook, json=payload)
+            response.raise_for_status()
+            
+            print("✅ Status update sent to Discord")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Could not send status update: {e}")
+            return False
+    
     def run(self):
         """Main monitoring logic"""
         print("="*50)
@@ -238,9 +301,14 @@ class SimpleMonitor:
         elif not self.last_hash:
             print("📝 First run - saving initial state")
             self.save_state(current_hash)
+            # Send initial status
+            self.send_status_update(current_hash)
         
         else:
             print("✅ No changes detected")
+            # Send status update (if enabled)
+            if self.send_status_updates:
+                self.send_status_update(current_hash)
         
         print("="*50)
         print("Check complete")
