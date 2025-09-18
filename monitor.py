@@ -84,7 +84,15 @@ class SportsLineMonitor:
         try:
             print("Fetching picks page...")
             r = self.session.get(self.expert_url)
+            print(f"Page status: {r.status_code}")
+            print(f"Page size: {len(r.content)} bytes")
+            
             soup = BeautifulSoup(r.content, 'html.parser')
+            
+            # Debug: Check if we're logged in
+            page_text = soup.get_text()
+            if 'subscribe now' in page_text.lower() or 'join now' in page_text.lower():
+                print("⚠️ WARNING: Might not be logged in properly (seeing subscribe prompts)")
             
             picks = []
             
@@ -107,6 +115,16 @@ class SportsLineMonitor:
             
             # Method 3: Search for patterns in text
             text = soup.get_text()
+            print(f"Searching text ({len(text)} characters)...")
+            
+            # Debug: Show a sample of what we're seeing
+            if 'baltimore' in text.lower() or 'yankees' in text.lower() or 'lakers' in text.lower():
+                print("✓ Found team names in page")
+            else:
+                print("⚠️ No common team names found - page might be wrong")
+                # Print first 500 chars to see what we got
+                print(f"Page preview: {text[:500]}")
+            
             text_picks = self.extract_picks_from_text(text)
             picks.extend(text_picks)
             
@@ -115,8 +133,12 @@ class SportsLineMonitor:
             for pick in picks:
                 if self.is_valid_pick(pick):
                     valid_picks.append(pick)
+                    print(f"✓ Valid pick found: {pick['game']}")
+                else:
+                    if pick and pick.get('game'):
+                        print(f"✗ Invalid pick filtered out: {pick['game']}")
             
-            print(f"Found {len(valid_picks)} valid picks")
+            print(f"Found {len(picks)} total picks, {len(valid_picks)} valid picks")
             return valid_picks
             
         except Exception as e:
