@@ -1,0 +1,98 @@
+name: SportsLine Monitor
+
+on:
+  schedule:
+    # Run every hour at :05 past the hour
+    - cron: '5 * * * *'
+  
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
+    inputs:
+      debug:
+        description: 'Enable debug logging'
+        required: false
+        default: 'false'
+
+jobs:
+  monitor-picks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Download previous state
+      uses: actions/download-artifact@v3
+      with:
+        name: monitor-state
+        path: .
+      continue-on-error: true
+    
+    - name: Run monitor
+      env:
+        SPORTSLINE_EMAIL: ${{ secrets.SPORTSLINE_EMAIL }}
+        SPORTSLINE_PASSWORD: ${{ secrets.SPORTSLINE_PASSWORD }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      run: |
+        python monitor.py
+    
+    - name: Upload state for next run
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: monitor-state
+        path: |
+          monitor_state.json
+        retention-days: 7
+    
+    - name: Upload logs on failure
+      uses: actions/upload-artifact@v3
+      if: failure()
+      with:
+        name: error-logs
+        path: |
+          *.log
+        retention-days: 3
+
+  # Optional: Daily summary job
+  daily-summary:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 21 * * *'  # 9 PM UTC = 4 PM EST
+    
+    steps:
+    - name: Send daily summary
+      env:
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      run: |
+        curl -X POST $DISCORD_WEBHOOK_URL \
+          -H "Content-Type: application/json" \
+          -d '{
+            "embeds": [{
+              "title": "📊 Daily Monitor Summary",
+              "description": "Monitor is active and checking hourly",
+              "color": 3447003,
+              "fields": [
+                {"name": "Status", "value": "✅ Online", "inline": true},
+                {"name": "Schedule", "value": "Every hour", "inline": true}
+              ],
+              "footer": {"text": "SportsLine Monitor Pro"}
+            }]
+          }'
