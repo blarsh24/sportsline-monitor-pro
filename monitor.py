@@ -232,6 +232,12 @@ class SportsLineMonitor:
                     print(f"✓ Final pick: {pick['game']} - {pick['pick']}")
             
             return final_picks
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
     def clean_pick_string(self, pick_str):
         """Clean up the pick string"""
