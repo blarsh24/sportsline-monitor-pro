@@ -141,6 +141,13 @@ class SportsLineMonitor:
                 team1 = re.sub(r'\s+', ' ', team1).strip()
                 team2 = re.sub(r'\s+', ' ', team2).strip()
                 
+                # Remove obvious junk from team names
+                junk_in_teams = ['UTC', 'Money Line', 'Point Spread', 'Over', 'Under', 'Subscri', 
+                                'LAST', 'Total', 'Spread']
+                for junk in junk_in_teams:
+                    team1 = team1.replace(junk, '').strip()
+                    team2 = team2.replace(junk, '').strip()
+                
                 # Basic validation
                 if len(team1) < 3 or len(team2) < 3:
                     continue
@@ -150,7 +157,7 @@ class SportsLineMonitor:
                 # Skip obvious non-teams
                 skip_words = ['sportsline', 'cbs', 'copyright', 'privacy', 'terms', 'cookie',
                              'subscribe', 'login', 'password', 'email', 'footer', 'header',
-                             'navigation', 'menu', 'search', 'share', 'follow']
+                             'navigation', 'menu', 'search', 'share', 'follow', 'interactive']
                 if any(skip in team1.lower() or skip in team2.lower() for skip in skip_words):
                     continue
                 
@@ -208,12 +215,38 @@ class SportsLineMonitor:
             seen_games_final = set()
             
             for pick in picks:
+                # Clean the game string once more
+                pick['game'] = self.clean_game_string(pick['game'])
+                
+                # Clean the pick string
+                pick['pick'] = self.clean_pick_string(pick['pick'])
+                
+                # Validate it's a real pick
+                if not self.is_valid_pick(pick):
+                    continue
+                
+                # Check for duplicates
                 if pick['game'] not in seen_games_final:
                     seen_games_final.add(pick['game'])
                     final_picks.append(pick)
                     print(f"✓ Final pick: {pick['game']} - {pick['pick']}")
             
             return final_picks
+    
+    def clean_pick_string(self, pick_str):
+        """Clean up the pick string"""
+        # Remove junk that got concatenated
+        junk = ['Money Line', 'Point Spread', 'Over', 'Under', 'Subscri', 'LAST', 'Total']
+        for j in junk:
+            pick_str = pick_str.replace(j, '')
+        
+        # Remove huge numbers that are clearly wrong
+        pick_str = re.sub(r'\+\d{4,}', '', pick_str)
+        
+        # Clean whitespace
+        pick_str = ' '.join(pick_str.split())
+        
+        return pick_str.strip()
             
         except Exception as e:
             print(f"Error: {e}")
@@ -222,8 +255,11 @@ class SportsLineMonitor:
             return []
     
     def extract_pick_details(self, game, context):
-        """Extract pick details from context"""
+        """Extract pick details from context - CLEANED UP"""
         try:
+            # Clean the game string first
+            game = self.clean_game_string(game)
+            
             teams = game.split('@')
             if len(teams) != 2:
                 return None
@@ -232,7 +268,7 @@ class SportsLineMonitor:
             home_team = teams[1].strip()
             
             # Default pick is home team
-            pick = home_team
+            pick_team = home_team
             
             # Try to find the actual pick
             pick_patterns = [
@@ -244,27 +280,43 @@ class SportsLineMonitor:
             for pattern in pick_patterns:
                 match = re.search(pattern, context, re.I)
                 if match:
-                    pick = match.group(1)
+                    pick_team = match.group(1)
                     break
             
             # Look for spread
             spread = ""
-            spread_match = re.search(r'([+-]\d+\.?\d?)', context)
+            spread_match = re.search(r'([+-]\d+\.?\d?)(?:\s|$)', context)
             if spread_match:
-                spread = spread_match.group(1)
-                pick = f"{pick} {spread}"
+                spread_val = spread_match.group(1)
+                # Validate it's a reasonable spread
+                try:
+                    if -50 < float(spread_val) < 50:  # Reasonable spread range
+                        spread = spread_val
+                        pick_team = f"{pick_team} {spread}"
+                except:
+                    pass
             
-            # Look for odds
+            # Look for odds (should be 3-4 digits with +/-)
             odds = "N/A"
             odds_match = re.search(r'([+-]\d{3,4})(?!\d)', context)
             if odds_match:
-                odds = odds_match.group(1)
+                odds_val = odds_match.group(1)
+                try:
+                    if -5000 < int(odds_val) < 5000:  # Reasonable odds range
+                        odds = odds_val
+                except:
+                    pass
             
             # Look for units
             units = "1"
             units_match = re.search(r'(\d+\.?\d?)\s*units?', context, re.I)
             if units_match:
-                units = units_match.group(1)
+                units_val = units_match.group(1)
+                try:
+                    if 0 < float(units_val) <= 10:  # Reasonable units range
+                        units = units_val
+                except:
+                    pass
             
             # Look for confidence
             confidence = ""
@@ -277,7 +329,7 @@ class SportsLineMonitor:
             
             return {
                 'game': game,
-                'pick': pick,
+                'pick': pick_team,
                 'odds': odds,
                 'units': units,
                 'confidence': confidence
@@ -286,6 +338,58 @@ class SportsLineMonitor:
         except Exception as e:
             print(f"Error extracting details: {e}")
             return None
+    
+    def clean_game_string(self, game):
+        """Clean up the game string by removing junk"""
+        # Remove common junk patterns
+        junk_patterns = [
+            r'UTC',  # Timezone indicator
+            r'Money Line.*',  # Bet type that got concatenated
+            r'Point Spread.*',  # Bet type
+            r'Over.*',  # Bet type
+            r'Under.*',  # Bet type
+            r'Subscri.*',  # "Subscribe" text
+            r'LAST.*',  # Other junk
+            r'\+\d{4,}.*',  # Weird long numbers
+        ]
+        
+        for pattern in junk_patterns:
+            game = re.sub(pattern, '', game, flags=re.I)
+        
+        # Clean extra whitespace
+        game = ' '.join(game.split())
+        
+        # Ensure @ is properly spaced
+        game = re.sub(r'\s*@\s*', ' @ ', game)
+        
+        return game.strip()
+    
+    def is_valid_pick(self, pick):
+        """Validate that this is a real sports pick - IMPROVED"""
+        if not pick or not pick.get('game'):
+            return False
+        
+        game = pick['game']
+        
+        # Skip obvious junk
+        if 'sportsline' in game.lower() or 'cbs' in game.lower():
+            return False
+        
+        # Must have @ separator
+        if '@' not in game:
+            return False
+        
+        teams = game.split('@')
+        if len(teams) != 2:
+            return False
+        
+        # Both teams must be reasonable length
+        for team in teams:
+            team = team.strip()
+            if len(team) < 3 or len(team) > 35:
+                return False
+        
+        return True
     
     def extract_pick_from_container(self, container):
         """Extract pick from a specific HTML container"""
