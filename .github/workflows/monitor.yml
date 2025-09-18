@@ -47,7 +47,7 @@ jobs:
         pip install -r requirements.txt
     
     - name: Download previous state
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: monitor-state
         path: .
@@ -75,7 +75,7 @@ jobs:
         python monitor.py
     
     - name: Upload state for next run
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: monitor-state
@@ -84,7 +84,7 @@ jobs:
         retention-days: 30
     
     - name: Upload logs on failure
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: failure()
       with:
         name: error-logs
