@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-SportsLine Monitor Pro v5.0 - FINAL PRODUCTION VERSION
-Perfect Discord formatting and status tracking
+SportsLine Monitor - SIMPLIFIED & WORKING VERSION
+Only sends real picks when they appear
 """
 
 import requests
@@ -9,679 +9,453 @@ from bs4 import BeautifulSoup
 import json
 import os
 import time
-import hashlib
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Set
+from datetime import datetime
 import re
-import logging
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-class Pick:
-    """Represents a betting pick with clean data"""
-    def __init__(self, game: str, pick: str, odds: str = "N/A", units: str = "1 unit", 
-                 analysis: str = "", confidence: str = "", sport: str = "", status: str = "LIVE"):
-        # Clean the game string - remove any garbage
-        self.game = self._clean_game_string(game)
-        # Clean the pick - remove duplicates and garbage
-        self.pick = self._clean_pick_string(pick)
-        self.odds = odds if odds != "See Site" else "Check Site"
-        self.units = units
-        # Clean analysis - remove unrelated text
-        self.analysis = self._clean_analysis(analysis)
-        self.confidence = confidence
-        self.sport = sport
-        self.status = status.upper()  # LIVE, WON, LOST, PUSH
-        self.timestamp = datetime.now().isoformat()
-        self.id = self._generate_id()
-    
-    def _clean_game_string(self, game: str) -> str:
-        """Clean up game matchup string"""
-        # Remove UTC, numbers, and weird characters
-        game = re.sub(r'UTC.*', '', game)
-        game = re.sub(r'\d{1,2}(?!\d)', '', game)  # Remove single/double digits
-        game = re.sub(r'[^\w\s@\.\-]', '', game)
-        game = re.sub(r'\s+', ' ', game).strip()
-        
-        # Ensure proper @ formatting
-        if '@' not in game and ' at ' in game.lower():
-            game = game.replace(' at ', ' @ ')
-        
-        return game
-    
-    def _clean_pick_string(self, pick: str) -> str:
-        """Clean up pick string - remove duplicates"""
-        # Remove duplicate team names and clean
-        pick = re.sub(r'(\w+)(\1)+', r'\1', pick)  # Remove duplicate words
-        pick = re.sub(r'Money Line[A-Z]*', '', pick)  # Remove Money Line text
-        pick = re.sub(r'[^\w\s\+\-\.]', '', pick)
-        pick = re.sub(r'\s+', ' ', pick).strip()
-        
-        # Extract just team name and spread if present
-        parts = pick.split()
-        if parts:
-            # Look for spread
-            spread = None
-            team_parts = []
-            for part in parts:
-                if re.match(r'^[+\-]\d+\.?\d*$', part):
-                    spread = part
-                else:
-                    team_parts.append(part)
-            
-            team = ' '.join(team_parts[:3])  # Max 3 words for team name
-            if spread:
-                return f"{team} {spread}"
-            return team
-        
-        return pick
-    
-    def _clean_analysis(self, analysis: str) -> str:
-        """Clean analysis text - remove unrelated content"""
-        if not analysis:
-            return "Check SportsLine for full analysis"
-        
-        # Remove common junk patterns
-        junk_patterns = [
-            r'UTC.*',
-            r'Money Line[A-Z]*',
-            r'Join Now.*',
-            r'Subscribe.*',
-            r'©.*',
-            r'San Siro.*',  # Random unrelated text
-            r'Inter lineup.*',  # Random unrelated text
-            r'Marcus Thuram.*'  # Random unrelated text
-        ]
-        
-        for pattern in junk_patterns:
-            analysis = re.sub(pattern, '', analysis, flags=re.I)
-        
-        # Clean whitespace
-        analysis = re.sub(r'\s+', ' ', analysis).strip()
-        
-        # If analysis is too short or seems wrong, provide default
-        if len(analysis) < 20 or 'calhanoglu' in analysis.lower():
-            return "Bruce Marshall's expert pick - check SportsLine for full analysis"
-        
-        return analysis[:400]  # Limit length
-    
-    def _generate_id(self) -> str:
-        """Generate unique ID for this pick"""
-        content = f"{self.game}-{self.pick}-{datetime.now().strftime('%Y-%m-%d')}"
-        return hashlib.md5(content.encode()).hexdigest()[:12]
-    
-    def is_live(self) -> bool:
-        """Check if pick is still live (not settled)"""
-        return self.status == "LIVE"
-    
-    def get_status_emoji(self) -> str:
-        """Get emoji for status"""
-        status_map = {
-            "LIVE": "🔴",
-            "WON": "✅", 
-            "LOST": "❌",
-            "PUSH": "➖"
-        }
-        return status_map.get(self.status, "⚪")
-    
-    def to_dict(self) -> dict:
-        return {
-            'id': self.id,
-            'game': self.game,
-            'pick': self.pick,
-            'odds': self.odds,
-            'units': self.units,
-            'analysis': self.analysis,
-            'confidence': self.confidence,
-            'sport': self.sport,
-            'status': self.status,
-            'timestamp': self.timestamp
-        }
+import hashlib
 
 class SportsLineMonitor:
-    """Main monitor with clean extraction and perfect Discord formatting"""
-    
     def __init__(self):
-        # Configuration
-        self.base_url = "https://www.sportsline.com"
-        self.expert_url = "https://www.sportsline.com/experts/51297150/bruce-marshall/"
-        self.login_url = "https://www.sportsline.com/login"
-        
-        # Credentials from environment
         self.email = os.environ.get('SPORTSLINE_EMAIL')
         self.password = os.environ.get('SPORTSLINE_PASSWORD')
         self.webhook = os.environ.get('DISCORD_WEBHOOK_URL')
         
-        # Check if this is a midnight run
-        current_hour = datetime.now().hour
-        self.is_midnight_run = (current_hour == 0) or os.environ.get('FORCE_MIDNIGHT', 'false').lower() == 'true'
+        self.expert_url = "https://www.sportsline.com/experts/51297150/bruce-marshall/"
+        self.login_url = "https://www.sportsline.com/login"
         
-        # Session management
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'
         })
         
-        # State management
-        self.state_file = 'monitor_state.json'
-        self.state = self.load_state()
+        # Load previous picks to avoid duplicates
+        self.state_file = 'picks_seen.json'
+        self.seen_picks = self.load_seen_picks()
         
-        logger.info(f"✅ Monitor initialized - Mode: {'MIDNIGHT (All LIVE)' if self.is_midnight_run else 'HOURLY (New Only)'}")
-    
-    def verify_setup(self) -> bool:
-        """Verify all requirements are met"""
-        if not self.email or not self.password:
-            logger.error("❌ Missing SportsLine credentials")
-            return False
-        if not self.webhook:
-            logger.error("❌ Missing Discord webhook URL")
-            return False
-        return True
-    
-    def load_state(self) -> dict:
-        """Load previous state"""
+    def load_seen_picks(self):
+        """Load picks we've already sent"""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not load state: {e}")
-        
-        return {
-            'sent_today': [],
-            'all_known_picks': [],
-            'last_midnight_run': None,
-            'last_check': None,
-            'total_picks_sent': 0
-        }
+                    return set(json.load(f))
+        except:
+            pass
+        return set()
     
-    def save_state(self):
-        """Save current state"""
+    def save_seen_picks(self):
+        """Save picks we've sent"""
         try:
-            self.state['last_check'] = datetime.now().isoformat()
-            if self.is_midnight_run:
-                self.state['last_midnight_run'] = datetime.now().isoformat()
-                self.state['sent_today'] = []  # Reset daily
-            
             with open(self.state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logger.error(f"Could not save state: {e}")
+                json.dump(list(self.seen_picks)[-500:], f)  # Keep last 500
+        except:
+            pass
     
-    def login(self) -> bool:
+    def login(self):
         """Login to SportsLine"""
         try:
-            logger.info("🔐 Logging in...")
+            print("Logging in...")
             
-            login_page = self.session.get(self.login_url)
-            soup = BeautifulSoup(login_page.content, 'html.parser')
+            # Get login page
+            r = self.session.get(self.login_url)
+            soup = BeautifulSoup(r.content, 'html.parser')
             
-            login_data = {
+            # Setup login data
+            data = {
                 'email': self.email,
-                'password': self.password,
-                'remember_me': '1'
+                'password': self.password
             }
             
-            # Add hidden fields
+            # Add any hidden fields from form
             form = soup.find('form')
             if form:
-                for hidden in form.find_all('input', type='hidden'):
-                    name = hidden.get('name')
-                    value = hidden.get('value', '')
-                    if name:
-                        login_data[name] = value
+                for inp in form.find_all('input', type='hidden'):
+                    if inp.get('name'):
+                        data[inp.get('name')] = inp.get('value', '')
             
-            response = self.session.post(
-                self.login_url,
-                data=login_data,
-                allow_redirects=True,
-                timeout=15
-            )
-            
-            # Simple success check
-            if 'logout' in response.text.lower() or len(response.text) > 10000:
-                logger.info("✅ Login successful")
-                return True
-            
-            logger.info("⚠️ Login uncertain, continuing...")
+            # Login
+            self.session.post(self.login_url, data=data)
+            print("Login attempt completed")
             return True
-            
         except Exception as e:
-            logger.error(f"Login error: {e}")
+            print(f"Login error: {e}")
             return False
     
-    def fetch_picks_page(self) -> Optional[str]:
-        """Fetch the picks page HTML"""
+    def get_picks_from_page(self):
+        """Get the actual picks from the page"""
         try:
-            logger.info("📥 Fetching picks...")
-            response = self.session.get(self.expert_url, timeout=15)
-            response.raise_for_status()
+            print("Fetching picks page...")
+            r = self.session.get(self.expert_url)
+            soup = BeautifulSoup(r.content, 'html.parser')
             
-            if len(response.content) < 1000:
-                logger.warning("Page too small")
-                return None
+            picks = []
             
-            logger.info(f"✅ Fetched {len(response.content)} bytes")
-            return response.text
+            # Method 1: Look for pick articles/divs
+            pick_containers = soup.find_all(['article', 'div'], class_=lambda x: x and ('pick' in str(x).lower() or 'play' in str(x).lower()))
+            
+            for container in pick_containers[:10]:
+                pick_data = self.extract_pick_from_container(container)
+                if pick_data:
+                    picks.append(pick_data)
+            
+            # Method 2: Look in tables
+            tables = soup.find_all('table')
+            for table in tables:
+                rows = table.find_all('tr')[1:]  # Skip header
+                for row in rows[:10]:
+                    pick_data = self.extract_pick_from_row(row)
+                    if pick_data:
+                        picks.append(pick_data)
+            
+            # Method 3: Search for patterns in text
+            text = soup.get_text()
+            text_picks = self.extract_picks_from_text(text)
+            picks.extend(text_picks)
+            
+            # Clean and validate picks
+            valid_picks = []
+            for pick in picks:
+                if self.is_valid_pick(pick):
+                    valid_picks.append(pick)
+            
+            print(f"Found {len(valid_picks)} valid picks")
+            return valid_picks
             
         except Exception as e:
-            logger.error(f"Fetch error: {e}")
+            print(f"Error getting picks: {e}")
+            return []
+    
+    def extract_pick_from_container(self, container):
+        """Extract pick from a container element"""
+        try:
+            text = container.get_text()
+            
+            # Look for team vs team pattern
+            match = re.search(r'([A-Z][A-Za-z\s\.]+?)\s+(?:@|vs\.?)\s+([A-Z][A-Za-z\s\.]+)', text)
+            if not match:
+                return None
+            
+            team1 = match.group(1).strip()
+            team2 = match.group(2).strip()
+            
+            # Skip if it's not real teams
+            if len(team1) < 3 or len(team2) < 3:
+                return None
+            if 'sportsline' in team1.lower() or 'sportsline' in team2.lower():
+                return None
+                
+            game = f"{team1} @ {team2}"
+            
+            # Find the pick
+            pick = team2  # Default
+            pick_match = re.search(r'(?:Pick|Play|Take)\s+([A-Za-z\s\.]+)', text, re.I)
+            if pick_match:
+                pick = pick_match.group(1).strip()
+            
+            # Find spread
+            spread_match = re.search(r'([+-]\d+\.?\d?)', text)
+            if spread_match:
+                pick += f" {spread_match.group(1)}"
+            
+            # Find odds
+            odds = "N/A"
+            odds_match = re.search(r'([+-]\d{3,4})(?!\d)', text)
+            if odds_match:
+                odds = odds_match.group(1)
+            
+            # Find units
+            units = "1"
+            units_match = re.search(r'(\d+\.?\d?)\s*units?', text, re.I)
+            if units_match:
+                units = units_match.group(1)
+            
+            # Find confidence
+            confidence = ""
+            if '5 star' in text.lower() or 'five star' in text.lower() or 'best bet' in text.lower():
+                confidence = "⭐⭐⭐⭐⭐"
+            elif '4 star' in text.lower():
+                confidence = "⭐⭐⭐⭐"
+            elif '3 star' in text.lower():
+                confidence = "⭐⭐⭐"
+            
+            return {
+                'game': game,
+                'pick': pick,
+                'odds': odds,
+                'units': units,
+                'confidence': confidence,
+                'raw_text': text[:200]
+            }
+            
+        except:
             return None
     
-    def extract_picks(self, html: str) -> List[Pick]:
-        """Extract picks with clean data"""
+    def extract_pick_from_row(self, row):
+        """Extract pick from table row"""
+        try:
+            cells = row.find_all(['td', 'th'])
+            if len(cells) < 2:
+                return None
+            
+            # Usually: Game | Pick | Odds | Units
+            game_text = cells[0].get_text().strip()
+            
+            # Parse game
+            match = re.search(r'([A-Z][A-Za-z\s\.]+?)\s+(?:@|vs\.?)\s+([A-Z][A-Za-z\s\.]+)', game_text)
+            if not match:
+                return None
+            
+            team1 = match.group(1).strip()
+            team2 = match.group(2).strip()
+            
+            if len(team1) < 3 or len(team2) < 3:
+                return None
+                
+            game = f"{team1} @ {team2}"
+            
+            # Get other cells
+            pick = cells[1].get_text().strip() if len(cells) > 1 else team2
+            odds = cells[2].get_text().strip() if len(cells) > 2 else "N/A"
+            units = cells[3].get_text().strip() if len(cells) > 3 else "1"
+            
+            return {
+                'game': game,
+                'pick': pick,
+                'odds': odds,
+                'units': units.replace('units', '').strip(),
+                'confidence': "",
+                'raw_text': row.get_text()[:200]
+            }
+            
+        except:
+            return None
+    
+    def extract_picks_from_text(self, text):
+        """Fallback: extract picks from raw text"""
         picks = []
-        soup = BeautifulSoup(html, 'html.parser')
         
-        logger.info("🔍 Extracting picks...")
-        
-        # Remove script and style elements first
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        # Get text and clean it
-        text = soup.get_text()
+        # Clean the text
         text = re.sub(r'\s+', ' ', text)
         
-        # Find all game matchups (more specific pattern)
-        # Pattern: Team @ Team or Team vs Team
-        game_patterns = [
-            r'([A-Z][A-Za-z\.\-\s]{2,20})\s*@\s*([A-Z][A-Za-z\.\-\s]{2,20})',
-            r'([A-Z][A-Za-z\.\-\s]{2,20})\s+vs\.?\s+([A-Z][A-Za-z\.\-\s]{2,20})'
-        ]
+        # Find all game patterns
+        game_pattern = r'([A-Z][A-Za-z]{2,}(?:\s+[A-Za-z]+)?)\s+@\s+([A-Z][A-Za-z]{2,}(?:\s+[A-Za-z]+)?)'
         
-        all_matches = []
-        for pattern in game_patterns:
-            matches = list(re.finditer(pattern, text))
-            all_matches.extend(matches)
-        
-        # Process each match
-        for match in all_matches[:15]:  # Limit to prevent too many
-            try:
-                away = match.group(1).strip()
-                home = match.group(2).strip()
-                
-                # Skip if teams too short or contain junk
-                if len(away) < 3 or len(home) < 3:
-                    continue
-                if any(junk in away.lower() + home.lower() for junk in 
-                       ['subscribe', 'copyright', 'utc', 'privacy', 'terms']):
-                    continue
-                
-                game = f"{away} @ {home}"
-                
-                # Get context around the match
-                start = max(0, match.start() - 300)
-                end = min(len(text), match.end() + 500)
-                context = text[start:end]
-                
-                # Detect status
-                status = "LIVE"
-                if re.search(r'\bWON?\b|✅|Winner', context, re.I):
-                    status = "WON"
-                elif re.search(r'\bLOST?\b|❌|Loser', context, re.I):
-                    status = "LOST"
-                elif re.search(r'\bPUSH\b|Tie', context, re.I):
-                    status = "PUSH"
-                
-                # Find the actual pick
-                pick_text = home  # Default
-                pick_patterns = [
-                    r'(?:Play|Pick|Take|Bet on)\s+([A-Z][A-Za-z\.\-\s]+?)(?:\s+[+\-\d]|\.|,|$)',
-                    r'([A-Z][A-Za-z\.\-\s]+?)\s+([+\-]\d+\.?\d?)',
-                ]
-                
-                for pp in pick_patterns:
-                    pm = re.search(pp, context)
-                    if pm:
-                        pick_text = pm.group(1).strip()
-                        if len(pm.groups()) > 1 and pm.group(2):
-                            pick_text += f" {pm.group(2)}"
-                        break
-                
-                # Extract odds
-                odds_match = re.search(r'([+\-]\d{3,4})(?!\d)', context)
-                odds = odds_match.group(1) if odds_match else "Check Site"
-                
-                # Extract units
-                units_match = re.search(r'(\d+\.?\d?)\s*units?', context, re.I)
-                units = f"{units_match.group(1)} units" if units_match else "1 unit"
-                
-                # Extract confidence
-                confidence = self._detect_confidence(context)
-                
-                # Extract sport
-                sport = self._detect_sport(game)
-                
-                # Extract analysis (clean)
-                analysis = self._extract_clean_analysis(context, game)
-                
-                pick = Pick(
-                    game=game,
-                    pick=pick_text,
-                    odds=odds,
-                    units=units,
-                    analysis=analysis,
-                    confidence=confidence,
-                    sport=sport,
-                    status=status
-                )
-                
-                picks.append(pick)
-                logger.info(f"Found: {pick.game} → {pick.pick} [{pick.status}]")
-                
-            except Exception as e:
-                logger.debug(f"Parse error: {e}")
+        for match in re.finditer(game_pattern, text):
+            team1 = match.group(1)
+            team2 = match.group(2)
+            
+            # Validate teams
+            if len(team1) < 3 or len(team2) < 3:
                 continue
+            if any(skip in (team1 + team2).lower() for skip in ['sportsline', 'cbs', 'copyright', 'privacy']):
+                continue
+            
+            # Get context
+            start = max(0, match.start() - 100)
+            end = min(len(text), match.end() + 200)
+            context = text[start:end]
+            
+            # Must have pick indicator
+            if not re.search(r'(pick|play|bet|take)', context, re.I):
+                continue
+            
+            game = f"{team1} @ {team2}"
+            pick = team2  # Default
+            
+            # Try to find actual pick
+            pick_match = re.search(r'(?:pick|play|take)\s+([A-Za-z\s]+?)(?:\s+[+-]|\.|$)', context, re.I)
+            if pick_match:
+                pick = pick_match.group(1).strip()
+            
+            picks.append({
+                'game': game,
+                'pick': pick,
+                'odds': "Check Site",
+                'units': "1",
+                'confidence': "",
+                'raw_text': context[:200]
+            })
+            
+            if len(picks) >= 5:
+                break
         
-        # Remove duplicates
-        unique_picks = []
-        seen_ids = set()
-        for pick in picks:
-            if pick.id not in seen_ids:
-                seen_ids.add(pick.id)
-                unique_picks.append(pick)
-        
-        logger.info(f"✅ Extracted {len(unique_picks)} unique picks")
-        return unique_picks
+        return picks
     
-    def _detect_confidence(self, text: str) -> str:
-        """Detect confidence level"""
-        text_lower = text.lower()
-        if 'best bet' in text_lower or '5 star' in text_lower or 'five star' in text_lower:
-            return "⭐⭐⭐⭐⭐ BEST BET"
-        elif '4 star' in text_lower:
-            return "⭐⭐⭐⭐ Strong"
-        elif '3 star' in text_lower:
-            return "⭐⭐⭐ Good"
-        elif 'lock' in text_lower:
-            return "🔒 LOCK"
-        return ""
-    
-    def _detect_sport(self, game: str) -> str:
-        """Detect sport from team names"""
-        game_lower = game.lower()
+    def is_valid_pick(self, pick):
+        """Validate that this is a real sports pick"""
+        if not pick or not pick.get('game'):
+            return False
         
-        nfl_teams = ['patriots', 'bills', 'jets', 'dolphins', 'ravens', 'steelers', 'browns', 'bengals',
-                     'chiefs', 'raiders', 'broncos', 'chargers', 'texans', 'colts', 'titans', 'jaguars',
-                     'eagles', 'cowboys', 'giants', 'commanders', 'packers', 'bears', 'lions', 'vikings',
-                     '49ers', 'seahawks', 'rams', 'cardinals', 'saints', 'falcons', 'panthers', 'buccaneers']
+        game = pick['game'].lower()
         
-        nba_teams = ['celtics', 'nets', 'knicks', '76ers', 'sixers', 'raptors', 'bulls', 'cavaliers',
-                     'pistons', 'pacers', 'bucks', 'hawks', 'hornets', 'heat', 'magic', 'wizards',
-                     'nuggets', 'timberwolves', 'thunder', 'blazers', 'jazz', 'warriors', 'clippers',
-                     'lakers', 'suns', 'kings', 'mavericks', 'rockets', 'grizzlies', 'pelicans', 'spurs']
+        # Must not contain website junk
+        junk = ['sportsline', 'cbs', 'interactive', '.com', 'copyright', 'privacy', 'terms']
+        if any(j in game for j in junk):
+            return False
         
-        mlb_teams = ['orioles', 'yankees', 'red sox', 'rays', 'blue jays', 'white sox', 'guardians',
-                     'tigers', 'royals', 'twins', 'astros', 'angels', 'athletics', 'mariners', 'rangers',
-                     'braves', 'marlins', 'mets', 'phillies', 'nationals', 'brewers', 'cubs', 'reds',
-                     'pirates', 'cardinals', 'diamondbacks', 'rockies', 'dodgers', 'padres', 'giants']
+        # Must have reasonable team names
+        teams = game.split('@')
+        if len(teams) != 2:
+            return False
         
-        if any(team in game_lower for team in nfl_teams):
-            return "🏈 NFL"
-        elif any(team in game_lower for team in nba_teams):
-            return "🏀 NBA"
-        elif any(team in game_lower for team in mlb_teams):
-            return "⚾ MLB"
-        elif 'college' in game_lower or 'state' in game_lower or 'university' in game_lower:
-            return "🎓 NCAA"
-        else:
-            return "🏟️"
-    
-    def _extract_clean_analysis(self, context: str, game: str) -> str:
-        """Extract only relevant analysis"""
-        # Try to find actual analysis
-        analysis_patterns = [
-            r'(?:Analysis|Reasoning|Why)[:\s]+([^.]+\.)',
-            r'(?:The|This|These)\s+(?:team|play|pick)[^.]+\.',
-            r'[A-Z][^.]*(?:should|will|could|might)[^.]+\.'
+        for team in teams:
+            team = team.strip()
+            if len(team) < 3 or len(team) > 30:
+                return False
+        
+        # Check if it's a known sport
+        all_teams = game
+        sports_keywords = [
+            # NFL
+            'patriots', 'bills', 'dolphins', 'jets', 'ravens', 'bengals', 'browns', 'steelers',
+            'texans', 'colts', 'jaguars', 'titans', 'broncos', 'chiefs', 'raiders', 'chargers',
+            'cowboys', 'giants', 'eagles', 'commanders', 'bears', 'lions', 'packers', 'vikings',
+            'falcons', 'panthers', 'saints', 'buccaneers', '49ers', 'cardinals', 'rams', 'seahawks',
+            # NBA
+            'lakers', 'clippers', 'warriors', 'suns', 'kings', 'blazers', 'nuggets', 'jazz',
+            'timberwolves', 'thunder', 'mavericks', 'rockets', 'grizzlies', 'pelicans', 'spurs',
+            'celtics', 'nets', 'knicks', '76ers', 'raptors', 'heat', 'magic', 'hawks',
+            'hornets', 'wizards', 'bulls', 'cavaliers', 'pistons', 'pacers', 'bucks',
+            # MLB  
+            'yankees', 'red sox', 'orioles', 'rays', 'blue jays', 'white sox', 'guardians',
+            'tigers', 'royals', 'twins', 'astros', 'angels', 'athletics', 'mariners', 'rangers',
+            'braves', 'marlins', 'mets', 'phillies', 'nationals', 'cubs', 'reds', 'brewers',
+            'pirates', 'cardinals', 'dodgers', 'padres', 'giants', 'diamondbacks', 'rockies',
+            # College
+            'state', 'university', 'college', 'tech', 'alabama', 'georgia', 'ohio', 'michigan',
+            'florida', 'texas', 'oklahoma', 'clemson', 'notre dame', 'usc', 'ucla'
         ]
         
-        for pattern in analysis_patterns:
-            match = re.search(pattern, context, re.I)
-            if match:
-                analysis = match.group(0) if match.group(0) else match.group(1)
-                # Clean it
-                analysis = re.sub(r'UTC.*', '', analysis)
-                analysis = re.sub(r'Money Line.*', '', analysis)
-                analysis = re.sub(r'\s+', ' ', analysis).strip()
-                
-                # Make sure it's related to the game
-                if any(team in analysis for team in game.split('@')):
-                    return analysis[:300]
+        # Must contain at least one sports keyword
+        if not any(keyword in all_teams for keyword in sports_keywords):
+            return False
         
-        return "Bruce Marshall's expert pick - see full analysis on SportsLine"
+        return True
     
-    def process_picks(self, all_picks: List[Pick]) -> List[Pick]:
-        """Process picks based on run type"""
-        picks_to_send = []
-        
-        if self.is_midnight_run:
-            # MIDNIGHT: Send ALL LIVE picks
-            logger.info("🌙 MIDNIGHT RUN - Sending all LIVE picks")
-            
-            for pick in all_picks:
-                if pick.is_live():
-                    picks_to_send.append(pick)
-                    if pick.id not in self.state['sent_today']:
-                        self.state['sent_today'].append(pick.id)
-            
-            logger.info(f"Found {len(picks_to_send)} LIVE picks")
-            
-        else:
-            # HOURLY: Send only NEW picks
-            logger.info("⏰ HOURLY RUN - Checking for NEW picks")
-            
-            known_picks = set(self.state.get('all_known_picks', []))
-            sent_today = set(self.state.get('sent_today', []))
-            
-            for pick in all_picks:
-                if pick.id not in known_picks:
-                    picks_to_send.append(pick)
-                    known_picks.add(pick.id)
-                    sent_today.add(pick.id)
-                    logger.info(f"NEW: {pick.game}")
-            
-            self.state['all_known_picks'] = list(known_picks)[-200:]
-            self.state['sent_today'] = list(sent_today)
-            
-            logger.info(f"Found {len(picks_to_send)} NEW picks")
-        
-        return picks_to_send
+    def generate_pick_id(self, pick):
+        """Generate unique ID for a pick"""
+        content = f"{pick['game']}-{pick['pick']}-{datetime.now().strftime('%Y-%m-%d')}"
+        return hashlib.md5(content.encode()).hexdigest()[:10]
     
-    def send_to_discord(self, picks: List[Pick], is_midnight: bool = False):
-        """Send CLEAN Discord notifications"""
-        if not picks:
-            logger.info("No picks to send")
-            return
-        
-        # Send header for midnight
-        if is_midnight:
-            self.send_midnight_header(len(picks))
-        
+    def send_to_discord(self, picks):
+        """Send picks to Discord"""
         for pick in picks:
             try:
-                # Color based on confidence
-                color = 0x2ECC71  # Green default
-                if "BEST BET" in pick.confidence or "⭐⭐⭐⭐⭐" in pick.confidence:
-                    color = 0xFFD700  # Gold
-                elif "LOCK" in pick.confidence:
-                    color = 0xE74C3C  # Red
-                elif "⭐⭐⭐⭐" in pick.confidence:
-                    color = 0xF39C12  # Orange
+                # Generate ID
+                pick_id = self.generate_pick_id(pick)
                 
-                # Title based on run type
-                if is_midnight:
-                    title = f"🌙 LIVE Pick - Bruce Marshall"
-                else:
-                    title = f"🆕 NEW Pick - Bruce Marshall"
+                # Skip if already sent
+                if pick_id in self.seen_picks:
+                    print(f"Skipping duplicate: {pick['game']}")
+                    continue
                 
-                # Build clean embed
+                # Detect sport
+                game_lower = pick['game'].lower()
+                sport = "🏟️"
+                if any(t in game_lower for t in ['patriots', 'bills', 'cowboys', 'chiefs', 'packers']):
+                    sport = "🏈 NFL"
+                elif any(t in game_lower for t in ['lakers', 'celtics', 'warriors', 'heat', 'knicks']):
+                    sport = "🏀 NBA"
+                elif any(t in game_lower for t in ['yankees', 'dodgers', 'astros', 'red sox']):
+                    sport = "⚾ MLB"
+                elif 'state' in game_lower or 'university' in game_lower:
+                    sport = "🎓 College"
+                
+                # Build embed
                 embed = {
-                    "title": title,
-                    "color": color,
+                    "title": "🎯 New Bruce Marshall Pick",
+                    "color": 0x00ff00 if not pick['confidence'] else 0xffd700,
                     "fields": [
                         {
-                            "name": f"{pick.sport} Game",
-                            "value": f"**{pick.game}**",
+                            "name": f"{sport} Game",
+                            "value": f"**{pick['game']}**",
                             "inline": False
                         },
                         {
                             "name": "📊 Pick",
-                            "value": f"**{pick.pick}**",
+                            "value": f"**{pick['pick']}**",
                             "inline": True
                         },
                         {
                             "name": "💰 Odds",
-                            "value": pick.odds,
+                            "value": pick['odds'],
                             "inline": True
                         },
                         {
-                            "name": "🎲 Units",
-                            "value": pick.units,
+                            "name": "🎲 Units", 
+                            "value": f"{pick['units']} unit{'s' if pick['units'] != '1' else ''}",
                             "inline": True
                         }
                     ],
-                    "timestamp": pick.timestamp
+                    "footer": {
+                        "text": "Bruce Marshall • SportsLine Premium"
+                    },
+                    "timestamp": datetime.now().isoformat()
                 }
-                
-                # Add status badge
-                status_field = {
-                    "name": "Status",
-                    "value": f"{pick.get_status_emoji()} **{pick.status}**",
-                    "inline": True
-                }
-                embed["fields"].insert(1, status_field)
                 
                 # Add confidence if present
-                if pick.confidence:
-                    embed["fields"].insert(2, {
+                if pick['confidence']:
+                    embed["fields"].insert(1, {
                         "name": "🔥 Confidence",
-                        "value": pick.confidence,
+                        "value": pick['confidence'],
                         "inline": False
                     })
-                
-                # Add clean analysis
-                if pick.analysis and len(pick.analysis) > 30:
-                    embed["fields"].append({
-                        "name": "📝 Analysis",
-                        "value": pick.analysis,
-                        "inline": False
-                    })
-                
-                # Footer
-                embed["footer"] = {
-                    "text": f"Bruce Marshall • SportsLine Premium",
-                    "icon_url": "https://www.sportsline.com/images/experts/51297150.jpg"
-                }
                 
                 payload = {
                     "username": "SportsLine Monitor",
-                    "avatar_url": "https://www.sportsline.com/images/experts/51297150.jpg",
                     "embeds": [embed]
                 }
                 
-                response = requests.post(self.webhook, json=payload, timeout=10)
-                response.raise_for_status()
+                r = requests.post(self.webhook, json=payload)
+                r.raise_for_status()
                 
-                logger.info(f"✅ Sent: {pick.game}")
-                time.sleep(2)  # Rate limit
+                print(f"✅ Sent: {pick['game']} - {pick['pick']}")
+                self.seen_picks.add(pick_id)
+                
+                time.sleep(2)
                 
             except Exception as e:
-                logger.error(f"Discord error: {e}")
-    
-    def send_midnight_header(self, count: int):
-        """Send clean midnight header"""
-        try:
-            embed = {
-                "title": "🌙 Daily LIVE Picks Summary",
-                "description": "All active picks from Bruce Marshall that haven't been settled yet",
-                "color": 0x3498DB,
-                "fields": [
-                    {
-                        "name": "📊 Total LIVE Picks",
-                        "value": f"**{count}**",
-                        "inline": True
-                    },
-                    {
-                        "name": "⏰ Updated",
-                        "value": datetime.now().strftime('%I:%M %p EST'),
-                        "inline": True
-                    }
-                ],
-                "footer": {
-                    "text": "All picks below are pending (not yet settled)"
-                }
-            }
-            
-            payload = {
-                "username": "SportsLine Monitor",
-                "embeds": [embed]
-            }
-            
-            requests.post(self.webhook, json=payload, timeout=10)
-            time.sleep(2)
-            
-        except Exception as e:
-            logger.error(f"Header error: {e}")
+                print(f"Discord error: {e}")
     
     def run(self):
         """Main execution"""
-        logger.info("="*50)
-        logger.info(f"🚀 Starting - {datetime.now().strftime('%I:%M %p')}")
-        logger.info(f"Mode: {'MIDNIGHT' if self.is_midnight_run else 'HOURLY'}")
+        print("\n" + "="*50)
+        print(f"SportsLine Monitor - {datetime.now().strftime('%I:%M %p')}")
+        print("="*50)
         
-        if not self.verify_setup():
+        # Check credentials
+        if not all([self.email, self.password, self.webhook]):
+            print("❌ Missing credentials!")
             return
         
+        # Login
         if not self.login():
-            logger.error("Login failed")
+            print("❌ Login failed")
             return
         
-        html = self.fetch_picks_page()
-        if not html:
-            logger.error("No page content")
+        # Get picks
+        picks = self.get_picks_from_page()
+        
+        if not picks:
+            print("No valid picks found")
             return
         
-        all_picks = self.extract_picks(html)
+        # Filter new picks
+        new_picks = []
+        for pick in picks:
+            pick_id = self.generate_pick_id(pick)
+            if pick_id not in self.seen_picks:
+                new_picks.append(pick)
         
-        # Show breakdown
-        live = sum(1 for p in all_picks if p.status == "LIVE")
-        won = sum(1 for p in all_picks if p.status == "WON")
-        lost = sum(1 for p in all_picks if p.status == "LOST")
-        logger.info(f"Found: {live} LIVE, {won} WON, {lost} LOST")
-        
-        picks_to_send = self.process_picks(all_picks)
-        
-        if picks_to_send:
-            logger.info(f"📤 Sending {len(picks_to_send)} picks...")
-            self.send_to_discord(picks_to_send, is_midnight=self.is_midnight_run)
-            self.state['total_picks_sent'] = self.state.get('total_picks_sent', 0) + len(picks_to_send)
+        if new_picks:
+            print(f"\n📤 Sending {len(new_picks)} new picks to Discord...")
+            self.send_to_discord(new_picks)
         else:
-            logger.info("✅ No picks to send")
+            print("No new picks to send (all previously seen)")
         
-        self.save_state()
-        logger.info("✅ Complete")
-        logger.info("="*50)
-
-def main():
-    try:
-        monitor = SportsLineMonitor()
-        monitor.run()
-    except Exception as e:
-        logger.error(f"Fatal: {e}")
-        webhook = os.environ.get('DISCORD_WEBHOOK_URL')
-        if webhook:
-            requests.post(webhook, json={"content": f"⚠️ Error: {str(e)[:100]}"})
+        # Save state
+        self.save_seen_picks()
+        
+        print("\n✅ Check complete")
 
 if __name__ == "__main__":
-    main()
+    monitor = SportsLineMonitor()
+    monitor.run()
