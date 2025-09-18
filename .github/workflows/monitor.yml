@@ -2,15 +2,22 @@ name: SportsLine Monitor
 
 on:
   schedule:
-    # Run every hour at :05 past the hour
-    - cron: '5 * * * *'
+    # Midnight EST (5 AM UTC) - Send all LIVE picks
+    - cron: '0 5 * * *'
+    
+    # Every hour from 6 AM to 11 PM EST (11 AM to 4 AM UTC) - Check for NEW picks
+    - cron: '0 11-23,0-4 * * *'
   
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
+  workflow_dispatch:  # Manual trigger
     inputs:
-      debug:
-        description: 'Enable debug logging'
+      force_midnight:
+        description: 'Force midnight mode (send all LIVE picks)'
         required: false
         default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   monitor-picks:
@@ -46,12 +53,25 @@ jobs:
         path: .
       continue-on-error: true
     
+    - name: Determine run type
+      id: run-type
+      run: |
+        HOUR=$(date -u +%H)
+        if [ "$HOUR" = "05" ] || [ "${{ github.event.inputs.force_midnight }}" = "true" ]; then
+          echo "Running MIDNIGHT mode - will send all LIVE picks"
+          echo "FORCE_MIDNIGHT=true" >> $GITHUB_ENV
+        else
+          echo "Running HOURLY mode - will check for NEW picks only"
+          echo "FORCE_MIDNIGHT=false" >> $GITHUB_ENV
+        fi
+    
     - name: Run monitor
       env:
         SPORTSLINE_EMAIL: ${{ secrets.SPORTSLINE_EMAIL }}
         SPORTSLINE_PASSWORD: ${{ secrets.SPORTSLINE_PASSWORD }}
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: |
+        echo "Starting monitor in $([ "$FORCE_MIDNIGHT" = "true" ] && echo "MIDNIGHT" || echo "HOURLY") mode..."
         python monitor.py
     
     - name: Upload state for next run
@@ -61,7 +81,7 @@ jobs:
         name: monitor-state
         path: |
           monitor_state.json
-        retention-days: 7
+        retention-days: 30
     
     - name: Upload logs on failure
       uses: actions/upload-artifact@v3
@@ -71,28 +91,3 @@ jobs:
         path: |
           *.log
         retention-days: 3
-
-  # Optional: Daily summary job
-  daily-summary:
-    runs-on: ubuntu-latest
-    if: github.event.schedule == '0 21 * * *'  # 9 PM UTC = 4 PM EST
-    
-    steps:
-    - name: Send daily summary
-      env:
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      run: |
-        curl -X POST $DISCORD_WEBHOOK_URL \
-          -H "Content-Type: application/json" \
-          -d '{
-            "embeds": [{
-              "title": "📊 Daily Monitor Summary",
-              "description": "Monitor is active and checking hourly",
-              "color": 3447003,
-              "fields": [
-                {"name": "Status", "value": "✅ Online", "inline": true},
-                {"name": "Schedule", "value": "Every hour", "inline": true}
-              ],
-              "footer": {"text": "SportsLine Monitor Pro"}
-            }]
-          }'
