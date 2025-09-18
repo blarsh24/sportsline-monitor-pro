@@ -2,15 +2,15 @@ name: SportsLine Monitor
 
 on:
   schedule:
-    # Run every hour
-    - cron: '0 * * * *'
+    # Run every 5 minutes
+    - cron: '*/5 * * * *'
   
   workflow_dispatch:  # Manual trigger
 
 jobs:
   check-picks:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     
     steps:
     - name: Checkout code
@@ -28,7 +28,7 @@ jobs:
     - name: Download state
       uses: actions/download-artifact@v4
       with:
-        name: picks-state
+        name: monitor-state
         path: .
       continue-on-error: true
     
@@ -44,6 +44,6 @@ jobs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: picks-state
-        path: picks_seen.json
-        retention-days: 90
+        name: monitor-state
+        path: page_state.json
+        retention-days: 30
