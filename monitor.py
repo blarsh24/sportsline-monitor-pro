@@ -1,367 +1,446 @@
 #!/usr/bin/env python3
 """
-SportsLine Monitor - SIMPLE ALERT VERSION
-Just notifies when Bruce Marshall's page changes
+SportsLine Monitor - BULLETPROOF VERSION
+Multiple detection methods to ensure we NEVER miss a pick
 """
 
 import requests
 from bs4 import BeautifulSoup
-import hashlib
 import json
 import os
-import re  # ADD THIS IMPORT
 from datetime import datetime
+import hashlib
+import re
+import time
 
-class SimpleMonitor:
+class SportsLineMonitor:
     def __init__(self):
-        # Credentials
         self.email = os.environ.get('SPORTSLINE_EMAIL')
         self.password = os.environ.get('SPORTSLINE_PASSWORD')
         self.webhook = os.environ.get('DISCORD_WEBHOOK_URL')
         
-        # Control whether to send status updates (can be turned off if too noisy)
-        self.send_status_updates = os.environ.get('SEND_STATUS_UPDATES', 'true').lower() == 'true'
-        
-        # URLs
         self.expert_url = "https://www.sportsline.com/experts/51297150/bruce-marshall/"
         self.login_url = "https://www.sportsline.com/login"
         
-        # Session
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
         })
         
-        # State file to track page changes
-        self.state_file = 'page_state.json'
+        self.state_file = 'monitor_state.json'
         self.load_state()
     
     def load_state(self):
-        """Load the last known page hash"""
+        """Load all previous tracking data"""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
-                    data = json.load(f)
-                    self.last_hash = data.get('last_hash', '')
-                    self.last_check = data.get('last_check', '')
+                    self.state = json.load(f)
             else:
-                self.last_hash = ''
-                self.last_check = ''
+                self.state = {
+                    'pick_count': 0,
+                    'page_size': 0,
+                    'picks_hash': '',
+                    'team_names': [],
+                    'timestamps': [],
+                    'last_check': '',
+                    'content_hash': ''
+                }
         except:
-            self.last_hash = ''
-            self.last_check = ''
-    
-    def save_state(self, new_hash):
-        """Save the current page hash"""
-        try:
-            data = {
-                'last_hash': new_hash,
-                'last_check': datetime.now().isoformat()
+            self.state = {
+                'pick_count': 0,
+                'page_size': 0,
+                'picks_hash': '',
+                'team_names': [],
+                'timestamps': [],
+                'last_check': '',
+                'content_hash': ''
             }
+    
+    def save_state(self, new_state):
+        """Save current state"""
+        try:
+            new_state['last_check'] = datetime.now().isoformat()
             with open(self.state_file, 'w') as f:
-                json.dump(data, f)
+                json.dump(new_state, f, indent=2)
+            self.state = new_state
         except Exception as e:
-            print(f"Could not save state: {e}")
+            print(f"Error saving state: {e}")
     
     def login(self):
-        """Simple login to SportsLine"""
+        """Robust login with verification"""
         try:
-            print("Logging in to SportsLine...")
+            print("🔐 Logging in to SportsLine...")
+            
+            # Clear cookies first
+            self.session.cookies.clear()
             
             # Get login page
-            response = self.session.get(self.login_url)
-            soup = BeautifulSoup(response.content, 'html.parser')
+            login_resp = self.session.get(self.login_url)
+            soup = BeautifulSoup(login_resp.content, 'html.parser')
             
-            # Setup login data
+            # Build complete login data
             login_data = {
                 'email': self.email,
-                'password': self.password
+                'password': self.password,
+                'remember': '1',
+                'remember_me': '1'
             }
             
-            # Add any hidden form fields
-            form = soup.find('form')
-            if form:
-                for hidden_input in form.find_all('input', type='hidden'):
-                    name = hidden_input.get('name')
-                    value = hidden_input.get('value', '')
-                    if name:
-                        login_data[name] = value
+            # Add ALL hidden fields
+            for form in soup.find_all('form'):
+                for field in form.find_all('input'):
+                    name = field.get('name')
+                    if name and name not in login_data:
+                        login_data[name] = field.get('value', '')
             
             # Submit login
-            self.session.post(self.login_url, data=login_data)
-            print("Login completed")
-            return True
+            post_resp = self.session.post(self.login_url, data=login_data, allow_redirects=True)
             
+            # Verify by checking the expert page
+            time.sleep(1)
+            test_resp = self.session.get(self.expert_url)
+            test_text = test_resp.text.lower()
+            
+            # Check if we're logged in
+            if 'logout' in test_text or 'my account' in test_text:
+                print("✅ Login successful (verified)")
+                return True
+            elif 'subscribe now' in test_text[:1000]:
+                print("⚠️ Login may have failed (seeing subscribe prompts)")
+                # Try one more time
+                self.session.post(self.login_url, data=login_data, allow_redirects=True)
+                time.sleep(2)
+                return True
+            else:
+                print("✅ Proceeding with current session")
+                return True
+                
         except Exception as e:
-            print(f"Login error: {e}")
+            print(f"❌ Login error: {e}")
             return False
     
-    def get_page_content(self):
-        """Get Bruce Marshall's page content"""
+    def analyze_page(self):
+        """Comprehensive page analysis using multiple methods"""
         try:
-            print("Fetching Bruce Marshall's page...")
-            response = self.session.get(self.expert_url)
+            print("📥 Fetching Bruce Marshall's page...")
+            
+            # Force fresh request (no cache)
+            response = self.session.get(
+                self.expert_url,
+                headers={'Cache-Control': 'no-cache'}
+            )
             
             if response.status_code != 200:
-                print(f"Error: Got status code {response.status_code}")
+                print(f"❌ Bad status code: {response.status_code}")
                 return None
             
-            # Parse the page
+            print(f"✅ Got {len(response.content)} bytes")
+            
+            # Parse with BeautifulSoup
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Get the main content area (picks are usually in main content)
-            # Remove headers, footers, ads, etc.
-            for element in soup.find_all(['script', 'style', 'nav', 'header', 'footer']):
-                element.decompose()
+            # Also get raw text
+            full_text = soup.get_text()
+            full_text = ' '.join(full_text.split())  # Clean whitespace
             
-            # Get text content
-            content = soup.get_text()
+            # Create comprehensive analysis
+            analysis = {
+                'pick_count': 0,
+                'page_size': len(response.content),
+                'picks_hash': '',
+                'team_names': [],
+                'timestamps': [],
+                'content_hash': '',
+                'picks_text': '',
+                'changes': []
+            }
             
-            # Clean it up
-            content = ' '.join(content.split())
+            # METHOD 1: Look for "Bruce's Picks (X Live)" or similar
+            print("🔍 Method 1: Checking pick count...")
+            count_patterns = [
+                r"Bruce's Picks\s*\((\d+)\s*Live\)",
+                r"Picks\s*\((\d+)\s*Live\)",
+                r"\((\d+)\s*Live\)",
+                r"(\d+)\s*Live\s*Pick",
+                r"(\d+)\s*Active\s*Pick"
+            ]
             
-            print(f"Got {len(content)} characters of content")
-            return content
+            for pattern in count_patterns:
+                match = re.search(pattern, full_text, re.IGNORECASE)
+                if match:
+                    analysis['pick_count'] = int(match.group(1))
+                    print(f"  ✓ Found {analysis['pick_count']} picks")
+                    break
+            
+            # METHOD 2: Extract all team matchups
+            print("🔍 Method 2: Finding team names...")
+            team_patterns = [
+                # Teams with odds/spreads
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[+\-]\d+(?:\.\d+)?',
+                # Teams in "@ Team" format
+                r'@\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+                # Specific teams we know about
+                r'(Chelsea|Manchester\s+United|Liverpool|Arsenal|Barcelona|Real\s+Madrid)',
+                r'(BYU|East\s+Carolina|UCLA|USC|Alabama|Georgia)',
+                # NFL teams
+                r'(Patriots|Cowboys|Packers|Chiefs|Bills|Eagles|49ers|Rams)',
+                # NBA teams
+                r'(Lakers|Celtics|Warriors|Heat|Bulls|Knicks|Nets)'
+            ]
+            
+            all_teams = set()
+            for pattern in team_patterns:
+                matches = re.findall(pattern, full_text)
+                all_teams.update(matches)
+            
+            # Filter out non-team words
+            non_teams = {'Money', 'Line', 'Point', 'Spread', 'Over', 'Under', 'Total', 'Props', 'Analysis', 'Unit'}
+            analysis['team_names'] = [team for team in all_teams if team not in non_teams and len(team) > 2]
+            print(f"  ✓ Found teams: {analysis['team_names'][:5]}..." if analysis['team_names'] else "  ✗ No teams found")
+            
+            # METHOD 3: Find timestamps (pick posting times)
+            print("🔍 Method 3: Finding timestamps...")
+            time_patterns = [
+                r'Sep\s+\d+,?\s+\d{4}',
+                r'\d{1,2}:\d{2}\s*[AP]M\s+PDT',
+                r'\d{1,2}:\d{2}\s*[ap]m',
+                r'Pick\s+Made:\s*([^\\n]+)',
+                r'Posted:\s*([^\\n]+)'
+            ]
+            
+            for pattern in time_patterns:
+                matches = re.findall(pattern, full_text)
+                analysis['timestamps'].extend(matches)
+            
+            print(f"  ✓ Found {len(analysis['timestamps'])} timestamps")
+            
+            # METHOD 4: Extract the actual picks section
+            print("🔍 Method 4: Extracting picks section...")
+            picks_section = ""
+            
+            # Find where picks start (after bio)
+            picks_markers = [
+                "Bruce's Picks",
+                "Live Picks",
+                "Today's Picks",
+                "Recent Picks",
+                "Money Line",
+                "Point Spread",
+                "Against the Spread"
+            ]
+            
+            for marker in picks_markers:
+                if marker in full_text:
+                    idx = full_text.index(marker)
+                    # Get everything from this marker forward
+                    picks_section = full_text[idx:min(idx + 5000, len(full_text))]
+                    print(f"  ✓ Found picks section at '{marker}'")
+                    break
+            
+            # If no marker found, skip the bio and take middle section
+            if not picks_section:
+                # Skip first 2000 chars (bio) and last 1000 (footer)
+                if len(full_text) > 3000:
+                    picks_section = full_text[2000:-1000]
+                    print(f"  ✓ Using middle section of page")
+            
+            analysis['picks_text'] = picks_section[:3000]  # Store first 3000 chars
+            
+            # METHOD 5: Look for specific pick elements in HTML
+            print("🔍 Method 5: Checking HTML structure...")
+            pick_elements = []
+            
+            # Look for divs/sections with pick-related classes
+            for element in soup.find_all(['div', 'article', 'section']):
+                element_text = element.get_text()
+                if any(word in element_text for word in ['Chelsea', 'Manchester', 'Unit:', 'Analysis:', '+145', '-105']):
+                    pick_elements.append(element_text[:200])
+            
+            print(f"  ✓ Found {len(pick_elements)} potential pick elements")
+            
+            # METHOD 6: Calculate hashes for change detection
+            print("🔍 Method 6: Calculating hashes...")
+            
+            # Hash of just the picks section
+            if picks_section:
+                # Remove volatile data (times that change on every load)
+                clean_picks = re.sub(r'\d+\s*(seconds?|minutes?|hours?)\s*ago', 'TIME_AGO', picks_section)
+                clean_picks = re.sub(r'\d{1,2}:\d{2}\s*[AP]M', 'TIME', clean_picks)
+                analysis['picks_hash'] = hashlib.md5(clean_picks.encode()).hexdigest()
+            
+            # Hash of full content (backup)
+            analysis['content_hash'] = hashlib.md5(full_text.encode()).hexdigest()
+            
+            print(f"  ✓ Picks hash: {analysis['picks_hash'][:12]}...")
+            print(f"  ✓ Content hash: {analysis['content_hash'][:12]}...")
+            
+            # METHOD 7: Count actual pick entries if visible
+            if analysis['pick_count'] == 0:
+                # Count unique games mentioned
+                games = set()
+                game_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*@\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+                for match in re.finditer(game_pattern, full_text):
+                    games.add(f"{match.group(1)} @ {match.group(2)}")
+                
+                if games:
+                    analysis['pick_count'] = len(games)
+                    print(f"  ✓ Counted {analysis['pick_count']} games")
+            
+            return analysis
             
         except Exception as e:
-            print(f"Error fetching page: {e}")
+            print(f"❌ Analysis error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
-    def calculate_hash(self, content):
-        """Calculate a hash of the PICKS content to detect changes"""
-        if not content:
-            return None
+    def detect_changes(self, current):
+        """Smart change detection using multiple signals"""
+        if not self.state['last_check']:
+            print("📝 First run - establishing baseline")
+            return True, "Monitor initialized. Now tracking Bruce Marshall's picks."
         
-        # Clean the content to focus on actual picks
-        cleaned_content = content
+        changes = []
         
-        # Remove timestamps that change every load
-        cleaned_content = re.sub(r'\d{1,2}:\d{2}\s*(AM|PM|am|pm)', '', cleaned_content)
-        cleaned_content = re.sub(r'\d+\s*(hours?|minutes?|seconds?)\s*ago', '', cleaned_content)
-        cleaned_content = re.sub(r'Sep \d+, \d{4}', '', cleaned_content)  # Remove dates like "Sep 20, 2025"
-        cleaned_content = re.sub(r'\d{1,2}\/\d{1,2}\/\d{4}', '', cleaned_content)  # Remove dates like "09/20/2025"
+        # CHECK 1: Pick count changed
+        if current['pick_count'] != self.state['pick_count']:
+            if current['pick_count'] > self.state['pick_count']:
+                diff = current['pick_count'] - self.state['pick_count']
+                changes.append(f"🆕 {diff} NEW PICK{'S' if diff > 1 else ''} ADDED!")
+            else:
+                changes.append(f"Pick count changed: {self.state['pick_count']} → {current['pick_count']}")
         
-        # Focus on the actual pick information
-        # Look for team names and pick details
-        important_parts = []
+        # CHECK 2: New teams appeared
+        old_teams = set(self.state.get('team_names', []))
+        new_teams = set(current['team_names'])
+        added_teams = new_teams - old_teams
+        if added_teams:
+            changes.append(f"New teams: {', '.join(list(added_teams)[:3])}")
         
-        # Extract team matchups (Chelsea +145, etc)
-        team_patterns = [
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[+\-]\d+',  # Team with spread/odds
-            r'Unit:\s*\d+\.?\d*',  # Unit amounts
-            r'Chelsea|Manchester|Liverpool|Arsenal',  # Soccer teams from screenshot
-            r'Analysis:',  # Analysis section
-            r'Pick Made:'  # Pick timestamp
-        ]
+        # CHECK 3: Content hash changed (catches any change)
+        if current['picks_hash'] and self.state.get('picks_hash'):
+            if current['picks_hash'] != self.state['picks_hash']:
+                changes.append("Pick content updated")
         
-        for pattern in team_patterns:
-            matches = re.findall(pattern, cleaned_content)
-            if matches:
-                important_parts.extend(matches)
+        # CHECK 4: Page size changed significantly (new content added)
+        if self.state.get('page_size', 0) > 0:
+            size_diff = current['page_size'] - self.state['page_size']
+            if abs(size_diff) > 500:  # Significant change
+                if size_diff > 0:
+                    changes.append(f"Page grew by {size_diff} bytes (new content)")
         
-        # If we found pick-specific content, use that
-        if important_parts:
-            picks_text = ' '.join(important_parts)
-            print(f"Hashing picks: {picks_text[:100]}...")
+        # CHECK 5: New timestamps appeared
+        old_times = set(self.state.get('timestamps', []))
+        new_times = set(current['timestamps'])
+        if len(new_times) > len(old_times):
+            changes.append("New pick timestamps detected")
+        
+        if changes:
+            return True, "\n".join(changes)
         else:
-            # Use the cleaned full content
-            picks_text = cleaned_content
-            print(f"Hashing full content: {picks_text[:100]}...")
-        
-        # Calculate hash
-        return hashlib.md5(picks_text.encode()).hexdigest()
+            return False, None
     
-    def send_discord_alert(self):
-        """Send a simple alert to Discord"""
+    def send_discord_alert(self, message, color=0xFF0000):
+        """Send alert to Discord"""
         try:
+            # Add pick count if we have it
+            pick_info = ""
+            if self.state.get('pick_count', 0) > 0:
+                pick_info = f"\n\n**Active Picks: {self.state['pick_count']}**"
+            
             embed = {
-                "title": "🚨 New Bruce Marshall Pick Available!",
-                "description": "Bruce Marshall has posted a new pick on SportsLine",
-                "color": 0xFF0000,  # Red for urgency
+                "title": "🚨 Bruce Marshall Update",
+                "description": message + pick_info,
+                "color": color,
                 "fields": [
                     {
-                        "name": "🔗 View Pick",
-                        "value": f"[**Click here to see the new pick**]({self.expert_url})",
+                        "name": "🔗 View All Picks",
+                        "value": f"[**CLICK HERE TO SEE PICKS**]({self.expert_url})",
                         "inline": False
                     },
                     {
-                        "name": "⏰ Alert Time",
-                        "value": datetime.now().strftime('%I:%M %p EST'),
+                        "name": "⏰ Time",
+                        "value": datetime.now().strftime('%I:%M %p'),
                         "inline": True
                     }
                 ],
-                "footer": {
-                    "text": "SportsLine Premium Monitor",
-                    "icon_url": "https://www.sportsline.com/favicon.ico"
-                }
+                "footer": {"text": "SportsLine Monitor • Checking every 5 minutes"}
             }
             
             payload = {
-                "username": "SportsLine Alert",
-                "content": "@everyone New pick from Bruce Marshall!",  # Optional ping
+                "username": "Bruce Marshall Alerts",
                 "embeds": [embed]
             }
             
             response = requests.post(self.webhook, json=payload)
             response.raise_for_status()
-            
-            print("✅ Alert sent to Discord!")
+            print("✅ Discord alert sent!")
             return True
             
         except Exception as e:
             print(f"❌ Discord error: {e}")
             return False
     
-    def send_status_update(self, current_hash, changed=False):
-        """Send status update to Discord"""
-        try:
-            if changed:
-                # Already handled by send_discord_alert
-                return
-            
-            # Send "no changes" status update
-            embed = {
-                "title": "✅ Monitor Status: Active",
-                "description": "No new picks found",
-                "color": 0x00FF00,  # Green for all good
-                "fields": [
-                    {
-                        "name": "📊 Status",
-                        "value": "Page unchanged - no new picks",
-                        "inline": False
-                    },
-                    {
-                        "name": "🔍 Current Hash",
-                        "value": f"`{current_hash[:12]}...`",
-                        "inline": True
-                    },
-                    {
-                        "name": "📝 Previous Hash", 
-                        "value": f"`{self.last_hash[:12]}...`" if self.last_hash else "First run",
-                        "inline": True
-                    },
-                    {
-                        "name": "⏰ Check Time",
-                        "value": datetime.now().strftime('%I:%M %p EST'),
-                        "inline": True
-                    },
-                    {
-                        "name": "📅 Last Change",
-                        "value": self.last_check if self.last_check else "Unknown",
-                        "inline": True
-                    }
-                ],
-                "footer": {
-                    "text": "Next check in 5 minutes",
-                    "icon_url": "https://www.sportsline.com/favicon.ico"
-                }
-            }
-            
-            payload = {
-                "username": "SportsLine Monitor",
-                "embeds": [embed]
-            }
-            
-            response = requests.post(self.webhook, json=payload)
-            response.raise_for_status()
-            
-            print("✅ Status update sent to Discord")
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ Could not send status update: {e}")
-            return False
-    
     def run(self):
-        """Main monitoring logic"""
-        print("="*50)
-        print(f"SportsLine Monitor - {datetime.now().strftime('%I:%M %p')}")
-        print("="*50)
+        """Main execution"""
+        print("\n" + "="*60)
+        print(f"🏈 SportsLine Monitor - {datetime.now().strftime('%I:%M %p')}")
+        print("="*60)
         
-        # Check if we should force an alert (for testing)
-        force_alert = os.environ.get('FORCE_ALERT', 'false').lower() == 'true'
-        if force_alert:
-            print("⚠️ FORCE_ALERT is enabled - will send alert regardless")
-        
-        # Check credentials
-        if not self.email or not self.password:
-            print("❌ Missing SportsLine credentials")
-            return
-        
-        if not self.webhook:
-            print("❌ Missing Discord webhook")
+        # Verify setup
+        if not all([self.email, self.password, self.webhook]):
+            print("❌ Missing credentials!")
             return
         
         # Login
         if not self.login():
-            print("❌ Could not login")
+            print("❌ Login failed!")
             return
         
-        # Get page content
-        content = self.get_page_content()
-        if not content:
-            print("❌ Could not get page content")
+        # Analyze page
+        current_analysis = self.analyze_page()
+        if not current_analysis:
+            print("❌ Could not analyze page")
             return
         
-        # Calculate hash
-        current_hash = self.calculate_hash(content)
-        if not current_hash:
-            print("❌ Could not calculate page hash")
-            return
+        print("\n📊 ANALYSIS RESULTS:")
+        print(f"  • Pick count: {current_analysis['pick_count']}")
+        print(f"  • Teams found: {len(current_analysis['team_names'])}")
+        print(f"  • Page size: {current_analysis['page_size']} bytes")
         
-        print(f"Current hash: {current_hash[:16]}...")
-        print(f"Previous hash: {self.last_hash[:16]}..." if self.last_hash else "No previous hash")
+        # Detect changes
+        has_changes, change_message = self.detect_changes(current_analysis)
         
-        # Check for actual text differences (backup check)
-        major_change = False
-        if self.last_hash:
-            # Check if hashes are different
-            if current_hash != self.last_hash:
-                major_change = True
-                print(f"📊 Hash difference detected!")
-                print(f"   Old: {self.last_hash[:16]}")
-                print(f"   New: {current_hash[:16]}")
-        
-        # Check if page changed OR force alert
-        if force_alert or (self.last_hash and (current_hash != self.last_hash or major_change)):
-            if force_alert:
-                print("🔥 FORCING ALERT (test mode)")
-            else:
-                print("🎯 PAGE CHANGED - New content detected!")
+        if has_changes:
+            print("\n🎯 CHANGES DETECTED!")
+            print(change_message)
             
-            # Send Discord alert
-            if self.send_discord_alert():
-                # Save new hash only if alert was sent successfully
-                self.save_state(current_hash)
-                print("✅ State updated")
-            else:
-                print("⚠️ Alert failed, will retry next run")
-        
-        elif not self.last_hash:
-            print("📝 First run - saving initial state")
-            self.save_state(current_hash)
-            # Send initial status
-            if self.send_status_updates:
-                self.send_status_update(current_hash)
-        
+            # Send alert
+            self.send_discord_alert(change_message)
+            
+            # Save new state
+            self.save_state(current_analysis)
         else:
-            print("✅ No changes detected")
-            # Show why they match
-            print(f"   Hashes match: {current_hash[:16]} == {self.last_hash[:16]}")
-            # Send status update (if enabled)
-            if self.send_status_updates:
-                self.send_status_update(current_hash)
+            print("\n✅ No changes detected")
+            
+            # Optional status update
+            if os.environ.get('SEND_STATUS', 'false').lower() == 'true':
+                status = f"No changes. Monitoring {current_analysis['pick_count']} active picks."
+                self.send_discord_alert(status, color=0x00FF00)
         
-        print("="*50)
-        print("Check complete")
+        print("="*60 + "\n")
 
 if __name__ == "__main__":
-    # Check for reset flag
-    if os.environ.get('RESET_STATE', 'false').lower() == 'true':
-        print("🔄 RESETTING STATE FILE")
-        if os.path.exists('page_state.json'):
-            os.remove('page_state.json')
-            print("✅ State file deleted - next run will be treated as first run")
+    # Allow forced reset
+    if os.environ.get('RESET', 'false').lower() == 'true':
+        if os.path.exists('monitor_state.json'):
+            os.remove('monitor_state.json')
+            print("🔄 State reset!")
     
-    monitor = SimpleMonitor()
+    monitor = SportsLineMonitor()
     monitor.run()
