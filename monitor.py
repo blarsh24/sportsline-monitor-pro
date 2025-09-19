@@ -131,21 +131,46 @@ class SimpleMonitor:
         if not content:
             return None
         
-        # Focus on the part that likely contains picks
-        # Look for keywords that indicate picks section
-        picks_section = content
+        # Remove timestamps and dynamic content that changes every load
+        # This might be causing false "no change" detections
+        cleaned_content = content
         
-        # Try to find the picks area
-        keywords = ['pick', 'play', 'bet', 'unit', 'spread', 'total', 'money line']
+        # Remove common dynamic elements
+        # Remove times (like "2 hours ago", "posted at 3:45 PM", etc)
+        cleaned_content = re.sub(r'\d{1,2}:\d{2}\s*(AM|PM|am|pm)', '', cleaned_content)
+        cleaned_content = re.sub(r'\d+\s*(hours?|minutes?|seconds?)\s*ago', '', cleaned_content)
+        cleaned_content = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)', '', cleaned_content)
+        
+        # Remove any long number sequences (these might be IDs that change)
+        cleaned_content = re.sub(r'\d{10,}', '', cleaned_content)
+        
+        # Focus on the actual picks content
+        # Look for pick-related content and extract a good chunk
+        picks_section = cleaned_content
+        
+        # Try to find the picks area more aggressively
+        keywords = ['pick', 'play', 'bet', 'unit', 'spread', 'total', 'money line', 
+                   'best bet', 'recommendation', 'lean', 'over', 'under']
+        
+        found_picks = False
         for keyword in keywords:
-            if keyword in content.lower():
+            if keyword in cleaned_content.lower():
                 # Found picks-related content
-                idx = content.lower().index(keyword)
-                # Get a good chunk around this area
-                start = max(0, idx - 1000)
-                end = min(len(content), idx + 5000)
-                picks_section = content[start:end]
+                idx = cleaned_content.lower().index(keyword)
+                # Get a larger chunk around this area
+                start = max(0, idx - 2000)
+                end = min(len(cleaned_content), idx + 8000)
+                picks_section = cleaned_content[start:end]
+                found_picks = True
+                print(f"Found picks section using keyword '{keyword}'")
                 break
+        
+        if not found_picks:
+            print("⚠️ WARNING: No pick keywords found - using full content")
+            picks_section = cleaned_content
+        
+        # Show what we're hashing (first 200 chars)
+        print(f"Hashing content sample: {picks_section[:200]}...")
         
         # Calculate hash
         return hashlib.md5(picks_section.encode()).hexdigest()
@@ -257,6 +282,11 @@ class SimpleMonitor:
         print(f"SportsLine Monitor - {datetime.now().strftime('%I:%M %p')}")
         print("="*50)
         
+        # Check if we should force an alert (for testing)
+        force_alert = os.environ.get('FORCE_ALERT', 'false').lower() == 'true'
+        if force_alert:
+            print("⚠️ FORCE_ALERT is enabled - will send alert regardless")
+        
         # Check credentials
         if not self.email or not self.password:
             print("❌ Missing SportsLine credentials")
@@ -283,12 +313,25 @@ class SimpleMonitor:
             print("❌ Could not calculate page hash")
             return
         
-        print(f"Current hash: {current_hash[:8]}...")
-        print(f"Previous hash: {self.last_hash[:8]}..." if self.last_hash else "No previous hash")
+        print(f"Current hash: {current_hash[:16]}...")
+        print(f"Previous hash: {self.last_hash[:16]}..." if self.last_hash else "No previous hash")
         
-        # Check if page changed
-        if self.last_hash and current_hash != self.last_hash:
-            print("🎯 PAGE CHANGED - New content detected!")
+        # Check for actual text differences (backup check)
+        major_change = False
+        if self.last_hash:
+            # Check if hashes are different
+            if current_hash != self.last_hash:
+                major_change = True
+                print(f"📊 Hash difference detected!")
+                print(f"   Old: {self.last_hash[:16]}")
+                print(f"   New: {current_hash[:16]}")
+        
+        # Check if page changed OR force alert
+        if force_alert or (self.last_hash and (current_hash != self.last_hash or major_change)):
+            if force_alert:
+                print("🔥 FORCING ALERT (test mode)")
+            else:
+                print("🎯 PAGE CHANGED - New content detected!")
             
             # Send Discord alert
             if self.send_discord_alert():
@@ -302,10 +345,13 @@ class SimpleMonitor:
             print("📝 First run - saving initial state")
             self.save_state(current_hash)
             # Send initial status
-            self.send_status_update(current_hash)
+            if self.send_status_updates:
+                self.send_status_update(current_hash)
         
         else:
             print("✅ No changes detected")
+            # Show why they match
+            print(f"   Hashes match: {current_hash[:16]} == {self.last_hash[:16]}")
             # Send status update (if enabled)
             if self.send_status_updates:
                 self.send_status_update(current_hash)
@@ -314,5 +360,12 @@ class SimpleMonitor:
         print("Check complete")
 
 if __name__ == "__main__":
+    # Check for reset flag
+    if os.environ.get('RESET_STATE', 'false').lower() == 'true':
+        print("🔄 RESETTING STATE FILE")
+        if os.path.exists('page_state.json'):
+            os.remove('page_state.json')
+            print("✅ State file deleted - next run will be treated as first run")
+    
     monitor = SimpleMonitor()
     monitor.run()
