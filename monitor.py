@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import hashlib
 import json
 import os
+import re  # ADD THIS IMPORT
 from datetime import datetime
 
 class SimpleMonitor:
