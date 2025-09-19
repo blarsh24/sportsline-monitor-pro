@@ -128,53 +128,48 @@ class SimpleMonitor:
             return None
     
     def calculate_hash(self, content):
-        """Calculate a hash of the content to detect changes"""
+        """Calculate a hash of the PICKS content to detect changes"""
         if not content:
             return None
         
-        # Remove timestamps and dynamic content that changes every load
-        # This might be causing false "no change" detections
+        # Clean the content to focus on actual picks
         cleaned_content = content
         
-        # Remove common dynamic elements
-        # Remove times (like "2 hours ago", "posted at 3:45 PM", etc)
+        # Remove timestamps that change every load
         cleaned_content = re.sub(r'\d{1,2}:\d{2}\s*(AM|PM|am|pm)', '', cleaned_content)
         cleaned_content = re.sub(r'\d+\s*(hours?|minutes?|seconds?)\s*ago', '', cleaned_content)
-        cleaned_content = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)', '', cleaned_content)
+        cleaned_content = re.sub(r'Sep \d+, \d{4}', '', cleaned_content)  # Remove dates like "Sep 20, 2025"
+        cleaned_content = re.sub(r'\d{1,2}\/\d{1,2}\/\d{4}', '', cleaned_content)  # Remove dates like "09/20/2025"
         
-        # Remove any long number sequences (these might be IDs that change)
-        cleaned_content = re.sub(r'\d{10,}', '', cleaned_content)
+        # Focus on the actual pick information
+        # Look for team names and pick details
+        important_parts = []
         
-        # Focus on the actual picks content
-        # Look for pick-related content and extract a good chunk
-        picks_section = cleaned_content
+        # Extract team matchups (Chelsea +145, etc)
+        team_patterns = [
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[+\-]\d+',  # Team with spread/odds
+            r'Unit:\s*\d+\.?\d*',  # Unit amounts
+            r'Chelsea|Manchester|Liverpool|Arsenal',  # Soccer teams from screenshot
+            r'Analysis:',  # Analysis section
+            r'Pick Made:'  # Pick timestamp
+        ]
         
-        # Try to find the picks area more aggressively
-        keywords = ['pick', 'play', 'bet', 'unit', 'spread', 'total', 'money line', 
-                   'best bet', 'recommendation', 'lean', 'over', 'under']
+        for pattern in team_patterns:
+            matches = re.findall(pattern, cleaned_content)
+            if matches:
+                important_parts.extend(matches)
         
-        found_picks = False
-        for keyword in keywords:
-            if keyword in cleaned_content.lower():
-                # Found picks-related content
-                idx = cleaned_content.lower().index(keyword)
-                # Get a larger chunk around this area
-                start = max(0, idx - 2000)
-                end = min(len(cleaned_content), idx + 8000)
-                picks_section = cleaned_content[start:end]
-                found_picks = True
-                print(f"Found picks section using keyword '{keyword}'")
-                break
-        
-        if not found_picks:
-            print("⚠️ WARNING: No pick keywords found - using full content")
-            picks_section = cleaned_content
-        
-        # Show what we're hashing (first 200 chars)
-        print(f"Hashing content sample: {picks_section[:200]}...")
+        # If we found pick-specific content, use that
+        if important_parts:
+            picks_text = ' '.join(important_parts)
+            print(f"Hashing picks: {picks_text[:100]}...")
+        else:
+            # Use the cleaned full content
+            picks_text = cleaned_content
+            print(f"Hashing full content: {picks_text[:100]}...")
         
         # Calculate hash
-        return hashlib.md5(picks_section.encode()).hexdigest()
+        return hashlib.md5(picks_text.encode()).hexdigest()
     
     def send_discord_alert(self):
         """Send a simple alert to Discord"""
